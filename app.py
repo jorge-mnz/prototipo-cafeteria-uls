@@ -3,14 +3,15 @@ import random
 import string
 import pandas as pd
 import io
+import os
 import qrcode
 from datetime import datetime
 
 # Configuración de página
-st.set_page_config(page_title="Cafetería ULS - Pedidos QR", page_icon="🍔", layout="wide")
+st.set_page_config(page_title="Domeyko GO - Casino ULS", page_icon="🍔", layout="wide")
 
 # ==========================================
-# PARÁMETROS ACTUALIZADOS
+# PARÁMETROS DEL SISTEMA
 # ==========================================
 LIMIT_PER_SLOT = 10  # Máximo 10 pedidos activos por franja
 TIME_SLOTS = [
@@ -24,10 +25,34 @@ if "db_orders" not in st.session_state:
     st.session_state.db_orders = []
 
 MENU = {
-    "Almuerzo Completo": {"precio": 3500, "baes": True, "desc": "Plato de fondo, ensalada, pan y postre"},
-    "Colación": {"precio": 2800, "baes": False, "desc": "Plato de fondo y pan (No apto BAES)"},
-    "Sándwich": {"precio": 1800, "baes": True, "desc": "Sándwich preparado del día"}
+    "Almuerzo Completo": {
+        "precio": 2650,
+        "baes": True,
+        "solo_baes": False,
+        "desc": "Plato de fondo, ensalada, pan y postre"
+    },
+    "Menú BAES": {
+        "precio": 2350,
+        "baes": True,
+        "solo_baes": True,
+        "desc": "Menú convenio exclusivo pago con tarjeta BAES / JUNAEB"
+    },
+    "Colación": {
+        "precio": 2000,
+        "baes": False,
+        "solo_baes": False,
+        "desc": "Plato de fondo y pan (No apto BAES)"
+    },
+    "Sándwich": {
+        "precio": 1800,
+        "baes": True,
+        "solo_baes": False,
+        "desc": "Sándwich preparado del día"
+    }
 }
+
+def formato_clp(valor: int) -> str:
+    return f"${valor:,}".replace(",", ".")
 
 def procesar_pago(metodo: str, monto: int):
     if metodo in ["Débito / Crédito", "BAES / JUNAEB", "Efectivo en Caja"]:
@@ -51,7 +76,12 @@ def generar_qr_image(data_text):
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-# Barra lateral
+# ==========================================
+# BARRA LATERAL Y LOGO
+# ==========================================
+if os.path.exists("logo.jpeg"):
+    st.sidebar.image("logo.jpeg", use_container_width=True)
+
 st.sidebar.title("📌 Menú de Navegación")
 modo = st.sidebar.radio("Selecciona la vista:", [
     "📱 Estudiante (Realizar Pedido)", 
@@ -59,9 +89,15 @@ modo = st.sidebar.radio("Selecciona la vista:", [
     "📊 Panel de Métricas / Exportación"
 ])
 
-# VISTA ESTUDIANTE
+# ==========================================
+# VISTA 1: ESTUDIANTE
+# ==========================================
 if modo == "📱 Estudiante (Realizar Pedido)":
-    st.title("🍔 Cafetería Campus Ignacio Domeyko")
+    if os.path.exists("logo.jpeg"):
+        st.image("logo.jpeg", width=360)
+    else:
+        st.title("🍔 Domeyko GO - Casino ULS")
+
     st.subheader("Sistema de Pedidos Anticipados por QR")
 
     tab1, tab2 = st.tabs(["🛍️ Nuevo Pedido", "🔍 Consultar Estado de Pedido"])
@@ -71,7 +107,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
         producto_sel = st.radio(
             "Opciones disponibles:",
             options=list(MENU.keys()),
-            format_func=lambda x: f"{x} - ${MENU[x]['precio']:,} ({MENU[x]['desc']})"
+            format_func=lambda x: f"{x} - {formato_clp(MENU[x]['precio'])} ({MENU[x]['desc']})"
         )
 
         st.markdown("---")
@@ -96,17 +132,21 @@ if modo == "📱 Estudiante (Realizar Pedido)":
         st.markdown("---")
         st.markdown("### 3. Medio de Pago")
         
-        metodos_pago = ["Débito / Crédito", "Efectivo en Caja"]
-        if MENU[producto_sel]["baes"]:
-            metodos_pago.append("BAES / JUNAEB")
+        if MENU[producto_sel]["solo_baes"]:
+            metodos_pago = ["BAES / JUNAEB"]
+            st.info("💳 Este menú es exclusivo para pago con tarjeta BAES / JUNAEB.")
         else:
-            st.warning("⚠️ Nota: El producto 'Colación' no admite pago con tarjeta BAES/JUNAEB.")
+            metodos_pago = ["Débito / Crédito", "Efectivo en Caja"]
+            if MENU[producto_sel]["baes"]:
+                metodos_pago.append("BAES / JUNAEB")
+            else:
+                st.warning("⚠️ Nota: El producto 'Colación' no admite pago con tarjeta BAES/JUNAEB.")
 
         pago_sel = st.selectbox("Selecciona tu medio de pago:", metodos_pago)
 
         st.markdown("---")
         total = MENU[producto_sel]["precio"]
-        st.write(f"**Total a Pagar:** ${total:,}")
+        st.write(f"**Total a Pagar:** {formato_clp(total)}")
 
         if st.button("Confirmar y Pagar Pedido", type="primary"):
             exito, tx_id = procesar_pago(pago_sel, total)
@@ -156,7 +196,9 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             else:
                 st.error("Código de pedido no encontrado.")
 
-# VISTA PERSONAL (KDS)
+# ==========================================
+# VISTA 2: PERSONAL CAFETERÍA (KDS)
+# ==========================================
 elif modo == "🍳 Personal Cafetería (KDS)":
     st.title("🍳 Pantalla de Control - Personal de Cafetería")
     
@@ -188,7 +230,9 @@ elif modo == "🍳 Personal Cafetería (KDS)":
                             order["hora_entrega"] = datetime.now().strftime("%H:%M:%S")
                         st.rerun()
 
-# VISTA MÉTRICAS Y EXPORTACIÓN
+# ==========================================
+# VISTA 3: MÉTRICAS Y EXPORTACIÓN
+# ==========================================
 else:
     st.title("📊 Análisis de Datos y Trazabilidad del Prototipo")
     st.markdown("Registro cuantitativo de órdenes para validación de tiempos de atención.")
