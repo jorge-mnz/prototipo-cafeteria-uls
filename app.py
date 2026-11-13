@@ -22,9 +22,14 @@ TIME_SLOTS = [
     "13:45 - 14:00"
 ]
 
-if "db_orders" not in st.session_state:
-    st.session_state.db_orders = []
+# Base de datos compartida en la memoria del servidor (visible para todos los dispositivos)
+@st.cache_resource
+def obtener_base_datos():
+    return []
 
+db_orders = obtener_base_datos()
+
+# Estado local individual de cada celular/navegador
 if "mis_pedidos" not in st.session_state:
     st.session_state.mis_pedidos = []
 
@@ -58,8 +63,6 @@ MENU = {
     }
 }
 
-ESTADOS_PEDIDO = ["Recibido", "En preparación", "Listo", "Entregado"]
-
 def formato_clp(valor: int) -> str:
     return f"${valor:,}".replace(",", ".")
 
@@ -73,8 +76,9 @@ def generar_id_pedido():
     return "ORD-" + ''.join(random.choices(string.digits, k=4))
 
 def contar_pedidos_franja(franja):
-    return sum(1 for o in st.session_state.db_orders if o["franja"] == franja and o["estado"] != "Entregado")
+    return sum(1 for o in db_orders if o["franja"] == franja and o["estado"] != "Entregado")
 
+@st.cache_data
 def generar_qr_image(data_text):
     qr = qrcode.QRCode(version=1, box_size=8, border=2)
     qr.add_data(data_text)
@@ -144,7 +148,14 @@ modo = st.sidebar.radio("Selecciona la vista:", [
 if st.session_state.personal_autenticado:
     st.sidebar.markdown("---")
     st.sidebar.success("🔓 Sesión de personal activa")
-    if st.sidebar.button("Cerrar sesión"):
+    
+    if st.sidebar.button("🗑️ Vaciar cupos y reiniciar", type="primary", use_container_width=True):
+        db_orders.clear()
+        st.session_state.mis_pedidos.clear()
+        st.toast("✅ Todos los pedidos fueron eliminados y los cupos reiniciados.")
+        st.rerun()
+
+    if st.sidebar.button("Cerrar sesión", use_container_width=True):
         st.session_state.personal_autenticado = False
         st.rerun()
 
@@ -159,20 +170,24 @@ if modo == "📱 Estudiante (Realizar Pedido)":
 
     st.subheader("Sistema de Pedidos Anticipados por QR")
 
-    # Seguimiento directo en pantalla si el usuario ya realizó pedidos en esta sesión
-    if st.session_state.mis_pedidos:
-        col_titulo, col_btn = st.columns([4, 1])
-        with col_titulo:
-            st.markdown("### 📍 Seguimiento en Vivo de tu Pedido")
-        with col_btn:
-            if st.button("🔄 Actualizar"):
-                st.rerun()
+    # Fragmento auto-actualizable cada 3 segundos para seguimiento en vivo en el celular
+    @st.fragment(run_every=3)
+    def seccion_seguimiento_vivo():
+        if st.session_state.mis_pedidos:
+            col_titulo, col_btn = st.columns([4, 1])
+            with col_titulo:
+                st.markdown("### 📍 Seguimiento en Vivo de tu Pedido")
+            with col_btn:
+                if st.button("🔄 Actualizar", key="btn_refresh_est"):
+                    st.rerun()
 
-        for pid in reversed(st.session_state.mis_pedidos):
-            pedido_actual = next((o for o in st.session_state.db_orders if o["id"] == pid), None)
-            if pedido_actual:
-                mostrar_tarjeta_seguimiento(pedido_actual)
-        st.markdown("---")
+            for pid in reversed(st.session_state.mis_pedidos):
+                pedido_actual = next((o for o in db_orders if o["id"] == pid), None)
+                if pedido_actual:
+                    mostrar_tarjeta_seguimiento(pedido_actual)
+            st.markdown("---")
+
+    seccion_seguimiento_vivo()
 
     # Formulario de nuevo pedido
     st.markdown("### 🛍️ Realizar Nuevo Pedido")
@@ -232,7 +247,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
                 "hora_registro": hora_actual,
                 "hora_entrega": "-"
             }
-            st.session_state.db_orders.append(nuevo_pedido)
+            db_orders.append(nuevo_pedido)
             st.session_state.mis_pedidos.append(order_id)
             st.rerun()
 
@@ -240,7 +255,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
     with st.expander("🔍 Consultar otro pedido por código"):
         busqueda_id = st.text_input("Ingresa el código de pedido (ej. ORD-1234):").strip().upper()
         if busqueda_id:
-            pedido_encontrado = next((o for o in st.session_state.db_orders if o["id"] == busqueda_id), None)
+            pedido_encontrado = next((o for o in db_orders if o["id"] == busqueda_id), None)
             if pedido_encontrado:
                 mostrar_tarjeta_seguimiento(pedido_encontrado)
             else:
@@ -253,7 +268,6 @@ elif modo == "🍳 Personal Cafetería (KDS)":
     if not verificar_login_personal():
         st.stop()
 
-    # CSS para que el botón primary ("Entregado") sea verde destacado en el KDS
     st.markdown("""
         <style>
         div.stButton > button[kind="primary"] {
@@ -277,14 +291,23 @@ elif modo == "🍳 Personal Cafetería (KDS)":
     """, unsafe_allow_html=True)
 
     st.title("🍳 Pantalla de Control - Personal de Cafetería")
-    
-    if not st.session_state.db_orders:
-        st.info("No hay pedidos registrados en el sistema.")
-    else:
-        pedidos_activos = [o for o in st.session_state.db_orders if o["estado"] != "Entregado"]
-        st.metric("Pedidos Pendientes / En Proceso", len(pedidos_activos))
 
-        for order in st.session_state.db_orders:
+    # Fragmento auto-actualizable cada 3 segundos para recibir pedidos desde celulares en vivo
+    @st.fragment(run_every=3)
+    def panel_pedidos_kds():
+        if not db_orders:
+            st.info("No hay pedidos registrados en el sistema. Esperando órdenes desde los celulares...")
+            return
+
+        pedidos_activos = [o for o in db_orders if o["estado"] != "Entregado"]
+        col_m, col_r = st.columns([4, 1])
+        with col_m:
+            st.metric("Pedidos Pendientes / En Proceso", len(pedidos_activos))
+        with col_r:
+            if st.button("🔄 Refrescar", key="btn_refresh_kds"):
+                st.rerun()
+
+        for order in db_orders:
             with st.expander(
                 f"📦 Pedido {order['id']} | {order['franja']} | {order['producto']} — Estado actual: {order['estado'].upper()}",
                 expanded=(order['estado'] != 'Entregado')
@@ -324,6 +347,8 @@ elif modo == "🍳 Personal Cafetería (KDS)":
                                 order["hora_entrega"] = "-"
                             st.rerun()
 
+    panel_pedidos_kds()
+
 # ==========================================
 # VISTA 3: MÉTRICAS Y EXPORTACIÓN
 # ==========================================
@@ -334,10 +359,10 @@ else:
     st.title("📊 Análisis de Datos y Trazabilidad del Prototipo")
     st.markdown("Registro cuantitativo de órdenes para validación de tiempos de atención.")
 
-    if not st.session_state.db_orders:
+    if not db_orders:
         st.info("Aún no hay datos recolectados. Registra algunos pedidos desde la vista de estudiante.")
     else:
-        df = pd.DataFrame(st.session_state.db_orders)
+        df = pd.DataFrame(db_orders)
         st.dataframe(df, use_container_width=True)
 
         csv_data = df.to_csv(index=False).encode('utf-8')
