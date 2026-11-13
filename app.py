@@ -22,6 +22,11 @@ TIME_SLOTS = [
     "13:45 - 14:00"
 ]
 
+# Tasas de refresco optimizadas para conectividad universitaria (en segundos)
+REFRESH_SEGUIMIENTO_ESTUDIANTE = 10
+REFRESH_CUPOS_ESTUDIANTE = 15
+REFRESH_KDS_OPERADOR = 6
+
 # Base de datos compartida en la memoria del servidor (visible para todos los dispositivos)
 @st.cache_resource
 def obtener_base_datos():
@@ -170,8 +175,10 @@ if modo == "📱 Estudiante (Realizar Pedido)":
 
     st.subheader("Sistema de Pedidos Anticipados por QR")
 
-    # Fragmento auto-actualizable cada 3 segundos para seguimiento en vivo en el celular
-    @st.fragment(run_every=3)
+    # 1) Seguimiento condicional: solo hace polling si el usuario tiene pedidos activos en su sesión
+    intervalo_seguimiento = REFRESH_SEGUIMIENTO_ESTUDIANTE if st.session_state.mis_pedidos else None
+
+    @st.fragment(run_every=intervalo_seguimiento)
     def seccion_seguimiento_vivo():
         if st.session_state.mis_pedidos:
             col_titulo, col_btn = st.columns([4, 1])
@@ -189,7 +196,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
 
     seccion_seguimiento_vivo()
 
-    # Formulario de nuevo pedido
+    # 2) Formulario de nuevo pedido
     st.markdown("### 🛍️ Realizar Nuevo Pedido")
     st.markdown("**1. Selecciona tu Producto**")
     producto_sel = st.radio(
@@ -198,22 +205,41 @@ if modo == "📱 Estudiante (Realizar Pedido)":
         format_func=lambda x: f"{x} - {formato_clp(MENU[x]['precio'])} ({MENU[x]['desc']})"
     )
 
-    st.markdown("**2. Selecciona la Franja Horaria de Retiro**")
-    franjas_disponibles = []
-    for slot in TIME_SLOTS:
-        ocupados = contar_pedidos_franja(slot)
-        if ocupados < LIMIT_PER_SLOT:
-            franjas_disponibles.append(f"{slot} ({LIMIT_PER_SLOT - ocupados} cupos disponibles)")
-        else:
-            franjas_disponibles.append(f"{slot} (AGOTADO)")
+    # Fragmento cada 15s para mostrar cupos disponibles sin interrumpir la selección en redes lentas
+    @st.fragment(run_every=REFRESH_CUPOS_ESTUDIANTE)
+    def selector_franja_vivo():
+        col_f_titulo, col_f_btn = st.columns([4, 1])
+        with col_f_titulo:
+            st.markdown("**2. Selecciona la Franja Horaria de Retiro**")
+        with col_f_btn:
+            if st.button("🔄 Cupos", key="btn_refresh_cupos"):
+                st.rerun()
+        
+        cols = st.columns(len(TIME_SLOTS))
+        for idx, slot in enumerate(TIME_SLOTS):
+            libres = max(0, LIMIT_PER_SLOT - contar_pedidos_franja(slot))
+            with cols[idx]:
+                st.metric(
+                    label=slot,
+                    value=f"{libres} / {LIMIT_PER_SLOT}",
+                    delta="Disponible" if libres > 0 else "Agotado",
+                    delta_color="normal" if libres > 0 else "off"
+                )
 
-    franja_sel_raw = st.selectbox("Franjas de retiro disponibles:", franjas_disponibles)
-    
-    if "AGOTADO" in franja_sel_raw:
-        st.error("⚠️ La franja seleccionada está totalmente agotada. Por favor elige otra.")
-        st.stop()
+        def formatear_franja(slot):
+            libres = max(0, LIMIT_PER_SLOT - contar_pedidos_franja(slot))
+            if libres > 0:
+                return f"{slot} ({libres} cupos disponibles)"
+            return f"{slot} (AGOTADO)"
 
-    franja_sel = franja_sel_raw.split(" (")[0]
+        st.selectbox(
+            "Franjas de retiro disponibles:",
+            options=TIME_SLOTS,
+            format_func=formatear_franja,
+            key="franja_elegida"
+        )
+
+    selector_franja_vivo()
 
     st.markdown("**3. Medio de Pago**")
     if MENU[producto_sel]["solo_baes"]:
@@ -232,24 +258,30 @@ if modo == "📱 Estudiante (Realizar Pedido)":
     st.write(f"**Total a Pagar:** {formato_clp(total)}")
 
     if st.button("Confirmar y Pagar Pedido", type="primary"):
-        exito, tx_id = procesar_pago(pago_sel, total)
-        if exito:
-            order_id = generar_id_pedido()
-            hora_actual = datetime.now().strftime("%H:%M:%S")
-            nuevo_pedido = {
-                "id": order_id,
-                "producto": producto_sel,
-                "precio": total,
-                "franja": franja_sel,
-                "pago": pago_sel,
-                "tx_id": tx_id,
-                "estado": "Recibido",
-                "hora_registro": hora_actual,
-                "hora_entrega": "-"
-            }
-            db_orders.append(nuevo_pedido)
-            st.session_state.mis_pedidos.append(order_id)
-            st.rerun()
+        franja_sel = st.session_state.get("franja_elegida", TIME_SLOTS[0])
+        
+        # Verificación estricta de cupos reales al momento exacto de confirmar
+        if contar_pedidos_franja(franja_sel) >= LIMIT_PER_SLOT:
+            st.error(f"⚠️ La franja **{franja_sel}** ya alcanzó el límite de {LIMIT_PER_SLOT} cupos. Por favor selecciona otro horario.")
+        else:
+            exito, tx_id = procesar_pago(pago_sel, total)
+            if exito:
+                order_id = generar_id_pedido()
+                hora_actual = datetime.now().strftime("%H:%M:%S")
+                nuevo_pedido = {
+                    "id": order_id,
+                    "producto": producto_sel,
+                    "precio": total,
+                    "franja": franja_sel,
+                    "pago": pago_sel,
+                    "tx_id": tx_id,
+                    "estado": "Recibido",
+                    "hora_registro": hora_actual,
+                    "hora_entrega": "-"
+                }
+                db_orders.append(nuevo_pedido)
+                st.session_state.mis_pedidos.append(order_id)
+                st.rerun()
 
     # Buscador secundario por si se consulta desde otro navegador o dispositivo
     with st.expander("🔍 Consultar otro pedido por código"):
@@ -292,8 +324,7 @@ elif modo == "🍳 Personal Cafetería (KDS)":
 
     st.title("🍳 Pantalla de Control - Personal de Cafetería")
 
-    # Fragmento auto-actualizable cada 3 segundos para recibir pedidos desde celulares en vivo
-    @st.fragment(run_every=3)
+    @st.fragment(run_every=REFRESH_KDS_OPERADOR)
     def panel_pedidos_kds():
         if not db_orders:
             st.info("No hay pedidos registrados en el sistema. Esperando órdenes desde los celulares...")
