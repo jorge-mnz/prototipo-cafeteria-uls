@@ -14,7 +14,7 @@ st.set_page_config(page_title="Domeyko GO - Casino ULS", page_icon="🍔", layou
 # PARÁMETROS DEL SISTEMA
 # ==========================================
 CLAVE_PERSONAL = "domeyko2026"  # Contraseña para acceder al KDS y Métricas
-LIMIT_PER_SLOT = 10             # Máximo 10 pedidos activos por franja
+LIMIT_PER_SLOT = 10             # Máximo 10 pedidos totales por franja
 TIME_SLOTS = [
     "13:00 - 13:15",
     "13:15 - 13:30",
@@ -81,7 +81,8 @@ def generar_id_pedido():
     return "ORD-" + ''.join(random.choices(string.digits, k=4))
 
 def contar_pedidos_franja(franja):
-    return sum(1 for o in db_orders if o["franja"] == franja and o["estado"] != "Entregado")
+    # Solo los pedidos "Descartado" liberan cupo; los "Entregado" siguen contando en la cuota de la franja
+    return sum(1 for o in db_orders if o["franja"] == franja and o["estado"] != "Descartado")
 
 @st.cache_data
 def generar_qr_image(data_text):
@@ -99,7 +100,8 @@ def mostrar_tarjeta_seguimiento(pedido: dict):
         "Recibido": 25,
         "En preparación": 50,
         "Listo": 85,
-        "Entregado": 100
+        "Entregado": 100,
+        "Descartado": 0
     }
     estado = pedido["estado"]
     with st.container(border=True):
@@ -107,7 +109,7 @@ def mostrar_tarjeta_seguimiento(pedido: dict):
         with col_info:
             st.markdown(f"#### 🧾 Pedido `{pedido['id']}` — {pedido['producto']}")
             st.write(f"**Franja de retiro:** {pedido['franja']} | **Pago:** {pedido['pago']} ({formato_clp(pedido['precio'])})")
-            st.progress(progreso_map.get(estado, 25))
+            st.progress(progreso_map.get(estado, 0))
             if estado == "Recibido":
                 st.info("🕒 Estado: **Recibido** (En cola de preparación)")
             elif estado == "En preparación":
@@ -116,6 +118,8 @@ def mostrar_tarjeta_seguimiento(pedido: dict):
                 st.success("✅ Estado: **¡LISTO PARA RETIRAR!** Acércate al mesón de entrega.")
             elif estado == "Entregado":
                 st.write(f"✔️ Estado: **Entregado** (Retirado a las {pedido['hora_entrega']})")
+            elif estado == "Descartado":
+                st.error("❌ Estado: **Descartado / Cancelado** (Acércate al mesón de atención para más detalles)")
         with col_qr:
             qr_bytes = generar_qr_image(f"PEDIDO:{pedido['id']}|FRANJA:{pedido['franja']}")
             st.image(qr_bytes, caption=pedido["id"], width=120)
@@ -175,7 +179,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
 
     st.subheader("Sistema de Pedidos Anticipados por QR")
 
-    # 1) Seguimiento condicional: solo hace polling si el usuario tiene pedidos activos en su sesión
+    # 1) Seguimiento condicional: solo hace polling si el usuario tiene pedidos en su sesión
     intervalo_seguimiento = REFRESH_SEGUIMIENTO_ESTUDIANTE if st.session_state.mis_pedidos else None
 
     @st.fragment(run_every=intervalo_seguimiento)
@@ -330,7 +334,7 @@ elif modo == "🍳 Personal Cafetería (KDS)":
             st.info("No hay pedidos registrados en el sistema. Esperando órdenes desde los celulares...")
             return
 
-        pedidos_activos = [o for o in db_orders if o["estado"] != "Entregado"]
+        pedidos_activos = [o for o in db_orders if o["estado"] not in ["Entregado", "Descartado"]]
         col_m, col_r = st.columns([4, 1])
         with col_m:
             st.metric("Pedidos Pendientes / En Proceso", len(pedidos_activos))
@@ -339,17 +343,29 @@ elif modo == "🍳 Personal Cafetería (KDS)":
                 st.rerun()
 
         for order in db_orders:
+            es_activo = order["estado"] not in ["Entregado", "Descartado"]
             with st.expander(
                 f"📦 Pedido {order['id']} | {order['franja']} | {order['producto']} — Estado actual: {order['estado'].upper()}",
-                expanded=(order['estado'] != 'Entregado')
+                expanded=es_activo
             ):
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns([2, 2, 1])
                 with col1:
                     st.write(f"**Producto:** {order['producto']}")
                     st.write(f"**Hora Pedido:** {order['hora_registro']}")
                 with col2:
                     st.write(f"**Pago:** {order['pago']}")
                     st.write(f"**Transacción:** `{order['tx_id']}`")
+                with col3:
+                    if order["estado"] != "Descartado":
+                        if st.button(
+                            "❌ Descartar",
+                            key=f"btn_disc_{order['id']}",
+                            help="Cancela el pedido y libera 1 cupo en esta franja",
+                            use_container_width=True
+                        ):
+                            order["estado"] = "Descartado"
+                            order["hora_entrega"] = "Descartado"
+                            st.rerun()
 
                 st.markdown("**Actualizar estado del pedido:**")
                 b1, b2, b3, b4 = st.columns(4)
