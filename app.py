@@ -443,28 +443,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
 
     st.subheader("Sistema de Pedidos Anticipados por QR")
 
-    # 1) Seguimiento en vivo condicional
-    intervalo_seguimiento = REFRESH_SEGUIMIENTO_ESTUDIANTE if st.session_state.mis_pedidos else None
-
-    @st.fragment(run_every=intervalo_seguimiento)
-    def seccion_seguimiento_vivo():
-        if st.session_state.mis_pedidos:
-            col_titulo, col_btn = st.columns([4, 1])
-            with col_titulo:
-                st.markdown("### 📍 Seguimiento en Vivo de tu Pedido")
-            with col_btn:
-                if st.button("🔄 Actualizar", key="btn_refresh_est"):
-                    st.rerun()
-
-            for pid in reversed(st.session_state.mis_pedidos):
-                pedido_actual = next((o for o in db_orders if o["id"] == pid), None)
-                if pedido_actual:
-                    mostrar_tarjeta_seguimiento(pedido_actual, permitir_acciones=True)
-            st.markdown("---")
-
-    seccion_seguimiento_vivo()
-
-    # 2) Catálogo con tarjetas visuales estilo menú (2 columnas)
+    # 1) Catálogo con tarjetas visuales estilo menú (2 columnas)
     st.markdown("### 🛍️ Arma tu Pedido")
     
     for prod, esta_agotado in config_op["productos_agotados"].items():
@@ -520,7 +499,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             st.markdown(f"**🛒 Resumen del Carrito ({total_items_carrito}/{MAX_ITEMS_CARRITO} productos = {total_items_carrito} cupo/s):** " + " + ".join(resumen_items))
             st.markdown(f"**Total Estimado:** {formato_clp(total_pagar)} *(se paga una vez que Caja confirme stock)*")
 
-    # 3) Datos del estudiante y franja horaria
+    # 2) Datos del estudiante y franja horaria
     st.markdown("### 📝 Datos de Retiro y Medio de Pago")
     nombre_cliente = st.text_input("Tu Nombre y Apellido (para llamarte en el mesón):", placeholder="Ej. Camila Rojas")
 
@@ -638,6 +617,27 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
             st.session_state.pedido_popup = nuevo_pedido
             st.rerun()
+
+    # 3) Seguimiento en vivo abajo (justo después de enviar/pagar el pedido)
+    intervalo_seguimiento = REFRESH_SEGUIMIENTO_ESTUDIANTE if st.session_state.mis_pedidos else None
+
+    @st.fragment(run_every=intervalo_seguimiento)
+    def seccion_seguimiento_vivo():
+        if st.session_state.mis_pedidos:
+            st.markdown("---")
+            col_titulo, col_btn = st.columns([4, 1])
+            with col_titulo:
+                st.markdown("### 📍 Seguimiento en Vivo de tu Pedido")
+            with col_btn:
+                if st.button("🔄 Actualizar", key="btn_refresh_est"):
+                    st.rerun()
+
+            for pid in reversed(st.session_state.mis_pedidos):
+                pedido_actual = next((o for o in db_orders if o["id"] == pid), None)
+                if pedido_actual:
+                    mostrar_tarjeta_seguimiento(pedido_actual, permitir_acciones=True)
+
+    seccion_seguimiento_vivo()
 
     st.markdown("---")
     with st.expander("🔍 Consultar otro pedido por código"):
