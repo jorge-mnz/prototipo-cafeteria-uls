@@ -6,18 +6,26 @@ import io
 import os
 import time
 import qrcode
+import cv2
+import numpy as np
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Configuración de página
 st.set_page_config(page_title="Domeyko GO - Casino ULS", page_icon="🍔", layout="wide")
 
 # ==========================================
-# PARÁMETROS DEL SISTEMA
+# PARÁMETROS DEL SISTEMA Y VERSIÓN
 # ==========================================
+# True  -> Versión de Pruebas: muestra interruptor para activar/desactivar validación horaria.
+# False -> Versión Oficial: oculta el interruptor y exige siempre pedir antes del inicio de la franja.
+MODO_PRUEBAS = True
+
 CLAVE_PERSONAL = "domeyko2026"  # Contraseña para acceder al KDS y Métricas
 LIMIT_PER_SLOT = 10             # Máximo 10 unidades/cupos por franja de 15 min
 MAX_ITEMS_CARRITO = 3           # Máximo 3 productos por pedido
 COOLDOWN_SEGUNDOS = 60          # Límite de 1 pedido por minuto por dispositivo
+ZONA_HORARIA_CL = ZoneInfo("America/Santiago")
 
 TIME_SLOTS = [
     "13:00 - 13:15",
@@ -30,26 +38,6 @@ TIME_SLOTS = [
 REFRESH_SEGUIMIENTO_ESTUDIANTE = 10
 REFRESH_CUPOS_ESTUDIANTE = 15
 REFRESH_KDS_OPERADOR = 6
-
-# Base de datos compartida en la memoria del servidor
-@st.cache_resource
-def obtener_base_datos():
-    return []
-
-db_orders = obtener_base_datos()
-
-# Estado local individual de cada celular/navegador
-if "mis_pedidos" not in st.session_state:
-    st.session_state.mis_pedidos = []
-
-if "personal_autenticado" not in st.session_state:
-    st.session_state.personal_autenticado = False
-
-if "ultimo_pedido_ts" not in st.session_state:
-    st.session_state.ultimo_pedido_ts = 0.0
-
-if "pedido_popup" not in st.session_state:
-    st.session_state.pedido_popup = None
 
 MENU = {
     "Almuerzo Completo": {
@@ -86,12 +74,49 @@ MENU = {
     }
 }
 
+# ==========================================
+# ESTADO COMPARTIDO EN SERVIDOR
+# ==========================================
+@st.cache_resource
+def obtener_base_datos():
+    return []
+
+@st.cache_resource
+def obtener_config_operativa():
+    return {
+        "validar_horario": True,
+        "productos_agotados": {prod: False for prod in MENU.keys()}
+    }
+
+db_orders = obtener_base_datos()
+config_op = obtener_config_operativa()
+
+# En versión oficial, forzar siempre la validación horaria activa
+if not MODO_PRUEBAS:
+    config_op["validar_horario"] = True
+
+# Estado local individual de cada celular/navegador
+if "mis_pedidos" not in st.session_state:
+    st.session_state.mis_pedidos = []
+
+if "personal_autenticado" not in st.session_state:
+    st.session_state.personal_autenticado = False
+
+if "ultimo_pedido_ts" not in st.session_state:
+    st.session_state.ultimo_pedido_ts = 0.0
+
+if "pedido_popup" not in st.session_state:
+    st.session_state.pedido_popup = None
+
 if "carrito" not in st.session_state:
     st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
 
 # ==========================================
 # FUNCIONES AUXILIARES
 # ==========================================
+def ahora_chile() -> datetime:
+    return datetime.now(ZONA_HORARIA_CL)
+
 def formato_clp(valor: int) -> str:
     return f"${valor:,}".replace(",", ".")
 
@@ -105,12 +130,21 @@ def generar_id_pedido():
     return "ORD-" + ''.join(random.choices(string.digits, k=4))
 
 def contar_cupos_ocupados_franja(franja: str) -> int:
-    # Cada unidad de producto ocupa 1 cupo en la franja (excepto pedidos descartados)
     return sum(
         o.get("cantidad_total", 1)
         for o in db_orders
         if o["franja"] == franja and o["estado"] != "Descartado"
     )
+
+def franja_esta_cerrada_por_hora(franja: str) -> bool:
+    """Retorna True si la validación está activa y la hora actual >= hora de inicio de la franja."""
+    if not config_op.get("validar_horario", True):
+        return False
+    hora_inicio_str = franja.split("-")[0].strip()  # ej. "13:00"
+    h_ini, m_ini = map(int, hora_inicio_str.split(":"))
+    ahora = ahora_chile()
+    inicio_franja = ahora.replace(hour=h_ini, minute=m_ini, second=0, microsecond=0)
+    return ahora >= inicio_franja
 
 def obtener_imagen_producto(prod: str) -> str:
     ruta_local = MENU[prod]["img_local"]
@@ -129,6 +163,38 @@ def generar_qr_image(data_text: str):
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+def decodificar_qr_imagen(uploaded_img) -> str:
+    file_bytes = np.asarray(bytearray(uploaded_img.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if img is None:
+        return ""
+    detector = cv2.QRCodeDetector()
+    data, _, _ = detector.detectAndDecode(img)
+    return data.strip() if data else ""
+
+def validar_y_entregar_token_qr(token: str):
+    if not token.startswith("DOMEYKO-QR|"):
+        return "error", "❌ Formato de QR no reconocido por Domeyko GO."
+    
+    partes = token.split("|")
+    oid_esc = partes[1] if len(partes) > 1 else ""
+    tx_esc = partes[2] if len(partes) > 2 else ""
+    pedido_obj = next(
+        (o for o in db_orders if o["id"] == oid_esc and o["tx_id"] == tx_esc),
+        None
+    )
+
+    if not pedido_obj:
+        return "error", "❌ Código QR no corresponde a ninguna orden registrada en el sistema."
+    if pedido_obj["estado"] == "Entregado":
+        return "warning", f"⚠️ El pedido **{oid_esc}** ({pedido_obj['cliente']}) ya fue entregado a las {pedido_obj['hora_entrega']}."
+    if pedido_obj["estado"] == "Descartado":
+        return "error", f"❌ El pedido **{oid_esc}** fue descartado y no es válido para retiro."
+
+    pedido_obj["estado"] = "Entregado"
+    pedido_obj["hora_entrega"] = ahora_chile().strftime("%H:%M:%S")
+    return "success", f"✅ QR válido: Pedido **{oid_esc}** de **{pedido_obj['cliente']}** ({pedido_obj['detalle_productos']}) marcado como ENTREGADO."
+
 @st.dialog("🎉 ¡Pedido Confirmado Exitosamente!")
 def mostrar_popup_confirmacion(pedido: dict):
     st.success(f"Gracias **{pedido['cliente']}**, tu orden ya ingresó a cocina.")
@@ -138,9 +204,9 @@ def mostrar_popup_confirmacion(pedido: dict):
         st.write(f"**Franja de retiro:** {pedido['franja']}")
         st.write(f"**Detalle:** {pedido['detalle_productos']}")
         st.write(f"**Total pagado:** {formato_clp(pedido['precio'])} ({pedido['pago']})")
-        st.info("Puedes cerrar esta ventana y revisar el avance en tiempo real más arriba.")
+        st.info("Muestra este QR en el mesón de entrega al retirar tu pedido.")
     with col_qr:
-        qr_bytes = generar_qr_image(f"PEDIDO:{pedido['id']}|CLIENTE:{pedido['cliente']}|FRANJA:{pedido['franja']}")
+        qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
         st.image(qr_bytes, caption=pedido["id"], width=130)
 
     if st.button("Entendido, ver seguimiento", type="primary", use_container_width=True):
@@ -167,13 +233,13 @@ def mostrar_tarjeta_seguimiento(pedido: dict):
             elif estado == "En preparación":
                 st.warning("👨‍🍳 Estado: **En preparación** (Tu pedido se está armando)")
             elif estado == "Listo":
-                st.success("✅ Estado: **¡LISTO PARA RETIRAR!** Acércate al mesón de entrega.")
+                st.success("✅ Estado: **¡LISTO PARA RETIRAR!** Acércate al mesón de entrega y muestra tu QR.")
             elif estado == "Entregado":
                 st.write(f"✔️ Estado: **Entregado** (Retirado a las {pedido['hora_entrega']})")
             elif estado == "Descartado":
                 st.error("❌ Estado: **Descartado / Cancelado** (Acércate al mesón de atención para más detalles)")
         with col_qr:
-            qr_bytes = generar_qr_image(f"PEDIDO:{pedido['id']}|CLIENTE:{pedido['cliente']}|FRANJA:{pedido['franja']}")
+            qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
             st.image(qr_bytes, caption=pedido["id"], width=120)
 
 def verificar_login_personal() -> bool:
@@ -199,6 +265,9 @@ def verificar_login_personal() -> bool:
 if os.path.exists("logo.jpeg"):
     st.sidebar.image("logo.jpeg", use_container_width=True)
 
+if MODO_PRUEBAS:
+    st.sidebar.warning("🧪 ENTORNO DE PRUEBAS")
+
 st.sidebar.title("📌 Menú de Navegación")
 modo = st.sidebar.radio("Selecciona la vista:", [
     "📱 Estudiante (Realizar Pedido)", 
@@ -209,12 +278,24 @@ modo = st.sidebar.radio("Selecciona la vista:", [
 if st.session_state.personal_autenticado:
     st.sidebar.markdown("---")
     st.sidebar.success("🔓 Sesión de personal activa")
+
+    # Control exclusivo de la versión de pruebas para activar/desactivar bloqueo horario
+    if MODO_PRUEBAS:
+        val_horaria = st.sidebar.toggle(
+            "⏰ Bloquear franjas ya iniciadas",
+            value=config_op["validar_horario"],
+            help="Si está activo, impide pedir en franjas cuya hora de inicio ya pasó."
+        )
+        if val_horaria != config_op["validar_horario"]:
+            config_op["validar_horario"] = val_horaria
+            st.rerun()
     
     if st.sidebar.button("🗑️ Vaciar cupos y reiniciar", type="primary", use_container_width=True):
         db_orders.clear()
         st.session_state.mis_pedidos.clear()
         st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
-        st.toast("✅ Todos los pedidos fueron eliminados y los cupos reiniciados.")
+        config_op["productos_agotados"] = {prod: False for prod in MENU.keys()}
+        st.toast("✅ Pedidos eliminados, stock restaurado y cupos reiniciados.")
         st.rerun()
 
     if st.sidebar.button("Cerrar sesión", use_container_width=True):
@@ -225,7 +306,6 @@ if st.session_state.personal_autenticado:
 # VISTA 1: ESTUDIANTE
 # ==========================================
 if modo == "📱 Estudiante (Realizar Pedido)":
-    # Mostrar pop-up si se acaba de confirmar un pedido
     if st.session_state.pedido_popup is not None:
         pedido_recien_creado = st.session_state.pedido_popup
         st.session_state.pedido_popup = None
@@ -261,6 +341,12 @@ if modo == "📱 Estudiante (Realizar Pedido)":
 
     # 2) Catálogo con tarjetas visuales estilo menú (2 columnas)
     st.markdown("### 🛍️ Arma tu Pedido")
+    
+    # Si un producto se agotó mientras estaba en el carrito, limpiar su cantidad automáticamente
+    for prod, esta_agotado in config_op["productos_agotados"].items():
+        if esta_agotado and st.session_state.carrito[prod] > 0:
+            st.session_state.carrito[prod] = 0
+
     total_items_carrito = sum(st.session_state.carrito.values())
     st.caption(f"Selecciona hasta **{MAX_ITEMS_CARRITO} productos** por pedido (1 producto = 1 cupo en la franja horaria).")
 
@@ -272,6 +358,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
                 prod = productos_lista[i + j]
                 info = MENU[prod]
                 cant_actual = st.session_state.carrito[prod]
+                agotado = config_op["productos_agotados"].get(prod, False)
 
                 with cols_cards[j]:
                     with st.container(border=True):
@@ -281,17 +368,20 @@ if modo == "📱 Estudiante (Realizar Pedido)":
                         with c_det:
                             st.markdown(f"#### {prod.upper()}")
                             st.caption(info["desc"])
-                            st.markdown(f"**{formato_clp(info['precio'])}**")
+                            if agotado:
+                                st.markdown(f"~~{formato_clp(info['precio'])}~~ — :red[**🚫 STOCK AGOTADO**]")
+                            else:
+                                st.markdown(f"**{formato_clp(info['precio'])}**")
                             
                             b_menos, b_cant, b_mas = st.columns([1, 1.2, 1])
                             with b_menos:
-                                if st.button("➖", key=f"dec_{prod}", disabled=(cant_actual == 0), use_container_width=True):
+                                if st.button("➖", key=f"dec_{prod}", disabled=(cant_actual == 0 or agotado), use_container_width=True):
                                     st.session_state.carrito[prod] -= 1
                                     st.rerun()
                             with b_cant:
                                 st.markdown(f"<div style='text-align:center; padding-top:6px; font-weight:bold;'>{cant_actual}</div>", unsafe_allow_html=True)
                             with b_mas:
-                                if st.button("➕", key=f"inc_{prod}", disabled=(total_items_carrito >= MAX_ITEMS_CARRITO), use_container_width=True):
+                                if st.button("➕", key=f"inc_{prod}", disabled=(total_items_carrito >= MAX_ITEMS_CARRITO or agotado), use_container_width=True):
                                     st.session_state.carrito[prod] += 1
                                     st.rerun()
 
@@ -315,6 +405,8 @@ if modo == "📱 Estudiante (Realizar Pedido)":
         col_f_titulo, col_f_btn = st.columns([4, 1])
         with col_f_titulo:
             st.markdown("**Selecciona la Franja Horaria de Retiro**")
+            if config_op.get("validar_horario", True):
+                st.caption(f"Hora actual: **{ahora_chile().strftime('%H:%M')}** — Solo puedes reservar franjas que aún no han comenzado.")
         with col_f_btn:
             if st.button("🔄 Cupos", key="btn_refresh_cupos"):
                 st.rerun()
@@ -322,15 +414,21 @@ if modo == "📱 Estudiante (Realizar Pedido)":
         cols = st.columns(len(TIME_SLOTS))
         for idx, slot in enumerate(TIME_SLOTS):
             libres = max(0, LIMIT_PER_SLOT - contar_cupos_ocupados_franja(slot))
+            cerrada_hora = franja_esta_cerrada_por_hora(slot)
             with cols[idx]:
-                st.metric(
-                    label=slot,
-                    value=f"{libres} / {LIMIT_PER_SLOT}",
-                    delta="Disponible" if libres > 0 else "Agotado",
-                    delta_color="normal" if libres > 0 else "off"
-                )
+                if cerrada_hora:
+                    st.metric(label=slot, value="CERRADA", delta="Fuera de hora", delta_color="off")
+                else:
+                    st.metric(
+                        label=slot,
+                        value=f"{libres} / {LIMIT_PER_SLOT}",
+                        delta="Disponible" if libres > 0 else "Agotado",
+                        delta_color="normal" if libres > 0 else "off"
+                    )
 
         def formatear_franja(slot):
+            if franja_esta_cerrada_por_hora(slot):
+                return f"{slot} (CERRADA - Ya inició el horario)"
             libres = max(0, LIMIT_PER_SLOT - contar_cupos_ocupados_franja(slot))
             if libres > 0:
                 return f"{slot} ({libres} cupos disponibles)"
@@ -376,9 +474,14 @@ if modo == "📱 Estudiante (Realizar Pedido)":
     if st.button("Confirmar y Pagar Pedido", type="primary", disabled=(total_items_carrito == 0 or not metodos_pago or en_cooldown)):
         franja_sel = st.session_state.get("franja_elegida", TIME_SLOTS[0])
         cupos_libres_reales = LIMIT_PER_SLOT - contar_cupos_ocupados_franja(franja_sel)
+        productos_sin_stock = [p for p in seleccionados if config_op["productos_agotados"].get(p, False)]
 
         if not nombre_cliente.strip():
             st.error("⚠️ Por favor ingresa tu nombre y apellido para identificar tu pedido al retirar.")
+        elif productos_sin_stock:
+            st.error(f"⚠️ Lo sentimos, el stock de **{', '.join(productos_sin_stock)}** acaba de agotarse en cocina.")
+        elif franja_esta_cerrada_por_hora(franja_sel):
+            st.error(f"⏰ La franja **{franja_sel}** ya comenzó (hora actual {ahora_chile().strftime('%H:%M')}) y no acepta nuevos pedidos. Selecciona una franja posterior.")
         elif total_items_carrito > cupos_libres_reales:
             st.error(f"⚠️ La franja **{franja_sel}** solo tiene **{cupos_libres_reales} cupo(s)** disponibles y tu carrito requiere **{total_items_carrito} cupos**. Reduce la cantidad o elige otro horario.")
         else:
@@ -386,7 +489,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             exito, tx_id = procesar_pago(pago_sel, total_pagar)
             if exito:
                 order_id = generar_id_pedido()
-                hora_actual = datetime.now().strftime("%H:%M:%S")
+                hora_actual = ahora_chile().strftime("%H:%M:%S")
                 detalle_str = " + ".join([f"{cant}x {prod}" for prod, cant in st.session_state.carrito.items() if cant > 0])
                 primer_prod = seleccionados[0] if len(seleccionados) == 1 else "Pedido Múltiple"
 
@@ -452,6 +555,64 @@ elif modo == "🍳 Personal Cafetería (KDS)":
 
     st.title("🍳 Pantalla de Control - Personal de Cafetería")
 
+    # Control rápido de stock de almuerzos y menú (sincronizado en vivo con estudiantes)
+    with st.expander("🛑 Control de Stock / Detener Venta de Productos", expanded=True):
+        st.caption("Apaga un producto cuando se acabe el stock en cocina para bloquear nuevas compras de inmediato.")
+        cols_stock = st.columns(len(MENU))
+        for idx, prod in enumerate(MENU.keys()):
+            with cols_stock[idx]:
+                esta_agotado = config_op["productos_agotados"].get(prod, False)
+                disponible = st.toggle(
+                    f"{prod}",
+                    value=(not esta_agotado),
+                    key=f"stock_toggle_{prod}"
+                )
+                nuevo_agotado = not disponible
+                if nuevo_agotado != esta_agotado:
+                    config_op["productos_agotados"][prod] = nuevo_agotado
+                    st.rerun()
+                if nuevo_agotado:
+                    st.error("🚫 Venta detenida")
+                else:
+                    st.success("✅ Disponible")
+
+    # Lector QR exclusivo para personal autorizado
+    with st.expander("📷 Escanear QR en Mesón para Entrega Rápida", expanded=False):
+        st.caption("Solo operativo dentro de la sesión del personal. Escanear el QR con una cámara externa normal no ejecuta acciones.")
+        col_cam, col_man = st.columns([1.2, 1])
+
+        with col_cam:
+            foto_qr = st.camera_input("Apunta la cámara al QR del estudiante", key="cam_kds_qr")
+            if foto_qr is not None:
+                texto_qr = decodificar_qr_imagen(foto_qr)
+                if texto_qr:
+                    tipo_res, msg_res = validar_y_entregar_token_qr(texto_qr)
+                    if tipo_res == "success":
+                        st.success(msg_res)
+                    elif tipo_res == "warning":
+                        st.warning(msg_res)
+                    else:
+                        st.error(msg_res)
+                else:
+                    st.warning("No se detectó un código QR nítido. Acerca el celular a la cámara y vuelve a capturar.")
+
+        with col_man:
+            st.markdown("**Lectura por pistola USB / ingreso manual:**")
+            token_manual = st.text_input(
+                "Escanea aquí con lector óptico:",
+                placeholder="DOMEYKO-QR|ORD-1234|TX-XXXXXX",
+                key="input_lector_usb"
+            ).strip()
+            if st.button("Validar y Entregar Token", key="btn_validar_token"):
+                if token_manual:
+                    tipo_res, msg_res = validar_y_entregar_token_qr(token_manual)
+                    if tipo_res == "success":
+                        st.success(msg_res)
+                    elif tipo_res == "warning":
+                        st.warning(msg_res)
+                    else:
+                        st.error(msg_res)
+
     def renderizar_tarjeta_kds(order: dict, prefix_key: str):
         with st.container(border=True):
             c_head, c_disc = st.columns([4, 1])
@@ -492,7 +653,7 @@ elif modo == "🍳 Personal Cafetería (KDS)":
                     ):
                         order["estado"] = estado_obj
                         if estado_obj == "Entregado":
-                            order["hora_entrega"] = datetime.now().strftime("%H:%M:%S")
+                            order["hora_entrega"] = ahora_chile().strftime("%H:%M:%S")
                         else:
                             order["hora_entrega"] = "-"
                         st.rerun()
@@ -561,7 +722,7 @@ else:
         st.download_button(
             label="📥 Descargar Reporte de Tiempos (CSV)",
             data=csv_data,
-            file_name=f"reporte_cafeteria_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            file_name=f"reporte_cafeteria_{ahora_chile().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv",
             type="primary"
         )
