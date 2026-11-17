@@ -82,6 +82,10 @@ def obtener_base_datos():
     return []
 
 @st.cache_resource
+def obtener_base_encuestas():
+    return []
+
+@st.cache_resource
 def obtener_config_operativa():
     return {
         "validar_horario": True,
@@ -89,6 +93,7 @@ def obtener_config_operativa():
     }
 
 db_orders = obtener_base_datos()
+db_surveys = obtener_base_encuestas()
 config_op = obtener_config_operativa()
 
 # En versión oficial, forzar siempre la validación horaria activa
@@ -98,6 +103,9 @@ if not MODO_PRUEBAS:
 # Estado local individual de cada celular/navegador
 if "mis_pedidos" not in st.session_state:
     st.session_state.mis_pedidos = []
+
+if "pedidos_notificados_listos" not in st.session_state:
+    st.session_state.pedidos_notificados_listos = set()
 
 if "personal_autenticado" not in st.session_state:
     st.session_state.personal_autenticado = False
@@ -140,11 +148,43 @@ def franja_esta_cerrada_por_hora(franja: str) -> bool:
     """Retorna True si la validación está activa y la hora actual >= hora de inicio de la franja."""
     if not config_op.get("validar_horario", True):
         return False
-    hora_inicio_str = franja.split("-")[0].strip()  # ej. "13:00"
+    hora_inicio_str = franja.split("-")[0].strip()
     h_ini, m_ini = map(int, hora_inicio_str.split(":"))
     ahora = ahora_chile()
     inicio_franja = ahora.replace(hour=h_ini, minute=m_ini, second=0, microsecond=0)
     return ahora >= inicio_franja
+
+def actualizar_estado_pedido(order: dict, nuevo_estado: str, motivo_descarte: str = "Descartado"):
+    """Actualiza el estado del pedido y registra las marcas de tiempo de cada etapa."""
+    ahora_str = ahora_chile().strftime("%H:%M:%S")
+    order["estado"] = nuevo_estado
+
+    if nuevo_estado == "En preparación" and order.get("hora_preparacion", "-") == "-":
+        order["hora_preparacion"] = ahora_str
+    elif nuevo_estado == "Listo":
+        if order.get("hora_preparacion", "-") == "-":
+            order["hora_preparacion"] = ahora_str
+        if order.get("hora_listo", "-") == "-":
+            order["hora_listo"] = ahora_str
+    elif nuevo_estado == "Entregado":
+        if order.get("hora_preparacion", "-") == "-":
+            order["hora_preparacion"] = ahora_str
+        if order.get("hora_listo", "-") == "-":
+            order["hora_listo"] = ahora_str
+        order["hora_entrega"] = ahora_str
+    elif nuevo_estado == "Descartado":
+        order["hora_entrega"] = motivo_descarte
+
+def calcular_minutos_diferencia(h_inicio: str, h_fin: str):
+    if not h_inicio or not h_fin or h_inicio == "-" or h_fin in ["-", "Descartado", "Cancelado por usuario"]:
+        return None
+    try:
+        t1 = datetime.strptime(h_inicio, "%H:%M:%S")
+        t2 = datetime.strptime(h_fin, "%H:%M:%S")
+        diff = (t2 - t1).total_seconds() / 60.0
+        return round(max(0.0, diff), 2)
+    except ValueError:
+        return None
 
 def obtener_imagen_producto(prod: str) -> str:
     ruta_local = MENU[prod]["img_local"]
@@ -189,10 +229,9 @@ def validar_y_entregar_token_qr(token: str):
     if pedido_obj["estado"] == "Entregado":
         return "warning", f"⚠️ El pedido **{oid_esc}** ({pedido_obj['cliente']}) ya fue entregado a las {pedido_obj['hora_entrega']}."
     if pedido_obj["estado"] == "Descartado":
-        return "error", f"❌ El pedido **{oid_esc}** fue descartado y no es válido para retiro."
+        return "error", f"❌ El pedido **{oid_esc}** fue descartado/cancelado y no es válido para retiro."
 
-    pedido_obj["estado"] = "Entregado"
-    pedido_obj["hora_entrega"] = ahora_chile().strftime("%H:%M:%S")
+    actualizar_estado_pedido(pedido_obj, "Entregado")
     return "success", f"✅ QR válido: Pedido **{oid_esc}** de **{pedido_obj['cliente']}** ({pedido_obj['detalle_productos']}) marcado como ENTREGADO."
 
 @st.dialog("🎉 ¡Pedido Confirmado Exitosamente!")
@@ -212,7 +251,7 @@ def mostrar_popup_confirmacion(pedido: dict):
     if st.button("Entendido, ver seguimiento", type="primary", use_container_width=True):
         st.rerun()
 
-def mostrar_tarjeta_seguimiento(pedido: dict):
+def mostrar_tarjeta_seguimiento(pedido: dict, permitir_cancelar: bool = False):
     progreso_map = {
         "Recibido": 25,
         "En preparación": 50,
@@ -221,6 +260,12 @@ def mostrar_tarjeta_seguimiento(pedido: dict):
         "Descartado": 0
     }
     estado = pedido["estado"]
+
+    # Disparar alerta emergente única cuando pasa a Listo
+    if estado == "Listo" and pedido["id"] not in st.session_state.pedidos_notificados_listos:
+        st.session_state.pedidos_notificados_listos.add(pedido["id"])
+        st.toast(f"🔔 ¡{pedido['cliente']}, tu pedido {pedido['id']} está LISTO para retirar!", icon="✅")
+
     with st.container(border=True):
         col_info, col_qr = st.columns([3, 1])
         with col_info:
@@ -230,14 +275,23 @@ def mostrar_tarjeta_seguimiento(pedido: dict):
             st.progress(progreso_map.get(estado, 0))
             if estado == "Recibido":
                 st.info("🕒 Estado: **Recibido** (En cola de preparación)")
+                if permitir_cancelar:
+                    if st.button(
+                        "🗑️ Cancelar Pedido (libera cupos)",
+                        key=f"cancel_user_{pedido['id']}",
+                        help="Puedes anular tu pedido solo antes de que cocina comience a prepararlo."
+                    ):
+                        actualizar_estado_pedido(pedido, "Descartado", motivo_descarte="Cancelado por usuario")
+                        st.toast(f"Pedido {pedido['id']} cancelado. Los cupos fueron liberados.")
+                        st.rerun()
             elif estado == "En preparación":
                 st.warning("👨‍🍳 Estado: **En preparación** (Tu pedido se está armando)")
             elif estado == "Listo":
-                st.success("✅ Estado: **¡LISTO PARA RETIRAR!** Acércate al mesón de entrega y muestra tu QR.")
+                st.success("🔔 **¡TU PEDIDO ESTÁ LISTO PARA RETIRAR!** Acércate al mesón de entrega y muestra tu QR.")
             elif estado == "Entregado":
                 st.write(f"✔️ Estado: **Entregado** (Retirado a las {pedido['hora_entrega']})")
             elif estado == "Descartado":
-                st.error("❌ Estado: **Descartado / Cancelado** (Acércate al mesón de atención para más detalles)")
+                st.error(f"❌ Estado: **Descartado / Cancelado** ({pedido.get('hora_entrega', 'Cancelado')})")
         with col_qr:
             qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
             st.image(qr_bytes, caption=pedido["id"], width=120)
@@ -279,7 +333,6 @@ if st.session_state.personal_autenticado:
     st.sidebar.markdown("---")
     st.sidebar.success("🔓 Sesión de personal activa")
 
-    # Control exclusivo de la versión de pruebas para activar/desactivar bloqueo horario
     if MODO_PRUEBAS:
         val_horaria = st.sidebar.toggle(
             "⏰ Bloquear franjas ya iniciadas",
@@ -292,10 +345,12 @@ if st.session_state.personal_autenticado:
     
     if st.sidebar.button("🗑️ Vaciar cupos y reiniciar", type="primary", use_container_width=True):
         db_orders.clear()
+        db_surveys.clear()
         st.session_state.mis_pedidos.clear()
+        st.session_state.pedidos_notificados_listos.clear()
         st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
         config_op["productos_agotados"] = {prod: False for prod in MENU.keys()}
-        st.toast("✅ Pedidos eliminados, stock restaurado y cupos reiniciados.")
+        st.toast("✅ Pedidos y encuestas eliminados, stock restaurado y cupos reiniciados.")
         st.rerun()
 
     if st.sidebar.button("Cerrar sesión", use_container_width=True):
@@ -334,7 +389,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             for pid in reversed(st.session_state.mis_pedidos):
                 pedido_actual = next((o for o in db_orders if o["id"] == pid), None)
                 if pedido_actual:
-                    mostrar_tarjeta_seguimiento(pedido_actual)
+                    mostrar_tarjeta_seguimiento(pedido_actual, permitir_cancelar=True)
             st.markdown("---")
 
     seccion_seguimiento_vivo()
@@ -342,7 +397,6 @@ if modo == "📱 Estudiante (Realizar Pedido)":
     # 2) Catálogo con tarjetas visuales estilo menú (2 columnas)
     st.markdown("### 🛍️ Arma tu Pedido")
     
-    # Si un producto se agotó mientras estaba en el carrito, limpiar su cantidad automáticamente
     for prod, esta_agotado in config_op["productos_agotados"].items():
         if esta_agotado and st.session_state.carrito[prod] > 0:
             st.session_state.carrito[prod] = 0
@@ -505,6 +559,8 @@ if modo == "📱 Estudiante (Realizar Pedido)":
                     "tx_id": tx_id,
                     "estado": "Recibido",
                     "hora_registro": hora_actual,
+                    "hora_preparacion": "-",
+                    "hora_listo": "-",
                     "hora_entrega": "-"
                 }
                 db_orders.append(nuevo_pedido)
@@ -514,15 +570,39 @@ if modo == "📱 Estudiante (Realizar Pedido)":
                 st.session_state.pedido_popup = nuevo_pedido
                 st.rerun()
 
+    st.markdown("---")
     # Buscador secundario por si se consulta desde otro navegador o dispositivo
     with st.expander("🔍 Consultar otro pedido por código"):
         busqueda_id = st.text_input("Ingresa el código de pedido (ej. ORD-1234):").strip().upper()
         if busqueda_id:
             pedido_encontrado = next((o for o in db_orders if o["id"] == busqueda_id), None)
             if pedido_encontrado:
-                mostrar_tarjeta_seguimiento(pedido_encontrado)
+                mostrar_tarjeta_seguimiento(pedido_encontrado, permitir_cancelar=False)
             else:
                 st.error("Código de pedido no encontrado.")
+
+    # Encuesta rápida de validación piloto con usuarios reales
+    with st.expander("⭐ Evaluar Prototipo (Validación Piloto ULS)"):
+        st.caption("Ayúdanos respondiendo estas 3 preguntas breves tras probar el sistema de pedidos:")
+        with st.form("form_encuesta_piloto", clear_on_submit=True):
+            eval_nombre = st.text_input("Tu nombre (opcional):", placeholder="Ej. Estudiante ULS")
+            eval_facilidad = st.slider("1. ¿Qué tan fácil fue realizar el pedido? (1 = Muy difícil, 5 = Muy fácil)", 1, 5, 5)
+            eval_ahorro = st.radio(
+                "2. ¿Sientes que este sistema reduciría tu tiempo de espera en fila?",
+                ["Sí, considerablemente", "Sí, un poco", "No noté diferencia"],
+                horizontal=True
+            )
+            eval_comentario = st.text_input("3. ¿Qué mejorarías o qué te costó entender? (opcional):")
+            enviar_eval = st.form_submit_button("Enviar Evaluación", type="primary")
+            if enviar_eval:
+                db_surveys.append({
+                    "hora": ahora_chile().strftime("%H:%M:%S"),
+                    "usuario": eval_nombre.strip() if eval_nombre.strip() else "Anónimo",
+                    "facilidad_1_a_5": eval_facilidad,
+                    "percepcion_ahorro": eval_ahorro,
+                    "comentario": eval_comentario.strip()
+                })
+                st.success("✅ ¡Muchas gracias! Tu evaluación quedó registrada para el estudio.")
 
 # ==========================================
 # VISTA 2: PERSONAL CAFETERÍA (KDS)
@@ -619,7 +699,10 @@ elif modo == "🍳 Personal Cafetería (KDS)":
             with c_head:
                 st.markdown(f"#### 📦 `{order['id']}` — 👤 **{order.get('cliente', 'Sin nombre')}**")
                 st.write(f"**Detalle:** {order.get('detalle_productos', order['producto'])} ({order.get('cantidad_total', 1)} cupo/s)")
-                st.caption(f"🕒 Pedido: {order['hora_registro']} | 💳 {order['pago']} ({formato_clp(order['precio'])}) | TX: `{order['tx_id']}`")
+                st.caption(
+                    f"🕒 Registro: {order['hora_registro']} | Prep: {order.get('hora_preparacion', '-')} | "
+                    f"Listo: {order.get('hora_listo', '-')} | 💳 {order['pago']} ({formato_clp(order['precio'])})"
+                )
             with c_disc:
                 if order["estado"] != "Descartado":
                     if st.button(
@@ -628,8 +711,7 @@ elif modo == "🍳 Personal Cafetería (KDS)":
                         help="Cancela el pedido y libera sus cupos en esta franja",
                         use_container_width=True
                     ):
-                        order["estado"] = "Descartado"
-                        order["hora_entrega"] = "Descartado"
+                        actualizar_estado_pedido(order, "Descartado", motivo_descarte="Descartado por operador")
                         st.rerun()
 
             b1, b2, b3, b4 = st.columns(4)
@@ -651,11 +733,7 @@ elif modo == "🍳 Personal Cafetería (KDS)":
                         disabled=es_actual,
                         use_container_width=True
                     ):
-                        order["estado"] = estado_obj
-                        if estado_obj == "Entregado":
-                            order["hora_entrega"] = ahora_chile().strftime("%H:%M:%S")
-                        else:
-                            order["hora_entrega"] = "-"
+                        actualizar_estado_pedido(order, estado_obj)
                         st.rerun()
 
     @st.fragment(run_every=REFRESH_KDS_OPERADOR)
@@ -710,12 +788,21 @@ else:
         st.stop()
 
     st.title("📊 Análisis de Datos y Trazabilidad del Prototipo")
-    st.markdown("Registro cuantitativo de órdenes para validación de tiempos de atención.")
+    st.markdown("Registro cuantitativo de órdenes y encuestas para validación de tiempos de atención.")
 
+    st.subheader("1. Tiempos de Operación por Pedido")
     if not db_orders:
         st.info("Aún no hay datos recolectados. Registra algunos pedidos desde la vista de estudiante.")
     else:
-        df = pd.DataFrame(db_orders)
+        registros_con_metricas = []
+        for o in db_orders:
+            fila = dict(o)
+            fila["min_espera_cola"] = calcular_minutos_diferencia(o.get("hora_registro"), o.get("hora_preparacion"))
+            fila["min_preparacion"] = calcular_minutos_diferencia(o.get("hora_preparacion"), o.get("hora_listo"))
+            fila["min_total_atencion"] = calcular_minutos_diferencia(o.get("hora_registro"), o.get("hora_entrega"))
+            registros_con_metricas.append(fila)
+
+        df = pd.DataFrame(registros_con_metricas)
         st.dataframe(df, use_container_width=True)
 
         csv_data = df.to_csv(index=False).encode('utf-8')
@@ -725,4 +812,22 @@ else:
             file_name=f"reporte_cafeteria_{ahora_chile().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv",
             type="primary"
+        )
+
+    st.markdown("---")
+    st.subheader("2. Resultados de Encuesta Piloto (Usabilidad)")
+    if not db_surveys:
+        st.info("Aún no hay respuestas de encuesta registradas desde la vista del estudiante.")
+    else:
+        df_surveys = pd.DataFrame(db_surveys)
+        promedio_facilidad = round(df_surveys["facilidad_1_a_5"].mean(), 2)
+        st.metric("Promedio Facilidad de Uso (1 a 5)", f"{promedio_facilidad} / 5.0", f"{len(df_surveys)} respuestas")
+        st.dataframe(df_surveys, use_container_width=True)
+
+        csv_surveys = df_surveys.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Descargar Encuestas Piloto (CSV)",
+            data=csv_surveys,
+            file_name=f"encuestas_piloto_{ahora_chile().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv"
         )
