@@ -19,7 +19,7 @@ st.set_page_config(page_title="Domeyko GO - Casino ULS", page_icon="🍔", layou
 # ==========================================
 # True  -> Versión de Pruebas: muestra interruptor para activar/desactivar validación horaria.
 # False -> Versión Oficial: oculta el interruptor y exige siempre pedir antes del inicio de la franja.
-MODO_PRUEBAS = True
+MODO_PRUEBAS = False
 
 CLAVE_PERSONAL = "domeyko2026"  # Contraseña para acceder al KDS y Métricas
 LIMIT_PER_SLOT = 10             # Máximo 10 unidades/cupos por franja de 15 min
