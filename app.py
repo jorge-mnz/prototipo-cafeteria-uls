@@ -795,70 +795,71 @@ elif modo == "💵 Caja (Aprobación y Stock)":
     panel_aprobacion_caja()
 
 # ==========================================
-# VISTA 3: COCINA (PREPARACIÓN Y ENTREGA)
+# VISTA 3: COCINA (PREPARACIÓN Y ENTREGA - ACCESIBLE)
 # ==========================================
 elif modo == "🍳 Cocina (Preparación y Entrega)":
     if not verificar_login_personal():
         st.stop()
 
+    # Estilos de alta visibilidad y botones extra grandes para personal de cocina
     st.markdown("""
         <style>
+        /* Botones principales (Entregar - Verde alto contraste) */
         div.stButton > button[kind="primary"] {
-            background-color: #28a745;
-            border-color: #28a745;
-            color: white;
-            font-weight: bold;
+            background-color: #198754 !important;
+            border: 3px solid #146c43 !important;
+            color: #ffffff !important;
+            font-size: 21px !important;
+            font-weight: 800 !important;
+            min-height: 68px !important;
+            border-radius: 12px !important;
+            letter-spacing: 0.4px !important;
         }
         div.stButton > button[kind="primary"]:hover {
-            background-color: #218838;
-            border-color: #1e7e34;
-            color: white;
+            background-color: #157347 !important;
+        }
+
+        /* Botones secundarios en tarjetas de cocina (Marcar Listo - Naranja/Ámbar llamativo) */
+        div[data-testid="stVerticalBlockBorderWrapper"] div.stButton > button[kind="secondary"] {
+            background-color: #e67e22 !important;
+            border: 3px solid #ca6f1e !important;
+            color: #ffffff !important;
+            font-size: 21px !important;
+            font-weight: 800 !important;
+            min-height: 68px !important;
+            border-radius: 12px !important;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] div.stButton > button[kind="secondary"]:hover {
+            background-color: #d35400 !important;
+        }
+
+        /* Textos más grandes y claros en tarjetas de pedidos */
+        .cocina-titulo-pedido {
+            font-size: 26px;
+            font-weight: 800;
+            margin-bottom: 4px;
+            line-height: 1.2;
+        }
+        .cocina-detalle-comida {
+            font-size: 23px;
+            font-weight: 700;
+            color: #1a202c;
+            background-color: #f8f9fa;
+            padding: 10px 14px;
+            border-radius: 8px;
+            border-left: 6px solid #0d6efd;
+            margin: 8px 0;
+        }
+        .cocina-subdato {
+            font-size: 17px;
+            color: #4a5568;
+            font-weight: 600;
         }
         </style>
     """, unsafe_allow_html=True)
 
-    st.title("🍳 Pantalla de Cocina — Preparación y Entrega en Mesón")
-
-    # Punto de escaneo QR
-    with st.expander("📷 Punto de Escaneo QR (Llegada de Estudiantes a Retirar)", expanded=False):
-        st.caption("Cuando un estudiante llega y escanea su QR aquí, cocina recibe la alerta inmediata para ir a entregarle.")
-        col_cam, col_man = st.columns([1.2, 1])
-
-        with col_cam:
-            foto_qr = st.camera_input("Escanea el QR del estudiante al llegar", key="cam_cocina_qr")
-            if foto_qr is not None:
-                texto_qr = decodificar_qr_imagen(foto_qr)
-                if texto_qr:
-                    tipo_res, msg_res = procesar_escaneo_qr_totem(texto_qr)
-                    if tipo_res == "success":
-                        st.success(msg_res)
-                    elif tipo_res == "warning":
-                        st.warning(msg_res)
-                    elif tipo_res == "info":
-                        st.info(msg_res)
-                    else:
-                        st.error(msg_res)
-                else:
-                    st.warning("No se detectó un código QR claro. Acerca el teléfono e intenta de nuevo.")
-
-        with col_man:
-            st.markdown("**Lectura por pistola USB / token QR:**")
-            token_manual = st.text_input(
-                "Escanea aquí con lector óptico:",
-                placeholder="DOMEYKO-QR|ORD-1234|TX-XXXXXX",
-                key="input_lector_cocina"
-            ).strip()
-            if st.button("Registrar Llegada con QR", key="btn_validar_cocina"):
-                if token_manual:
-                    tipo_res, msg_res = procesar_escaneo_qr_totem(token_manual)
-                    if tipo_res == "success":
-                        st.success(msg_res)
-                    elif tipo_res == "warning":
-                        st.warning(msg_res)
-                    elif tipo_res == "info":
-                        st.info(msg_res)
-                    else:
-                        st.error(msg_res)
+    st.markdown("# 🍳 Pantalla de Cocina")
+    st.markdown("#### Instrucciones rápidas: **1)** Prepara el pedido y toca **🔔 MARCAR LISTO**. **2)** Cuando llegue el estudiante, toca **🤝 ENTREGAR PEDIDO**.")
 
     @st.fragment(run_every=REFRESH_OPERACION)
     def panel_cocina_vivo():
@@ -867,101 +868,178 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
         listos_sin_llegar = [o for o in db_orders if o["estado"] == "Listo"]
         historial_cerrados = [o for o in db_orders if o["estado"] in ["Entregado", "Descartado"]]
 
-        c1, c2, c3, c_ref = st.columns([1.5, 1.5, 1.5, 1])
+        # Indicadores grandes y directos arriba
+        c1, c2, c3, c_ref = st.columns([1.6, 1.6, 1.6, 1])
         with c1:
-            st.metric("🚨 Clientes Esperando en Mesón", len(clientes_esperando))
+            st.metric("🚨 ESPERANDO EN MESÓN", len(clientes_esperando))
         with c2:
-            st.metric("👨‍🍳 Pagados en Preparación", len(en_preparacion))
+            st.metric("👨‍🍳 POR PREPARAR", len(en_preparacion))
         with c3:
-            st.metric("🔔 Listos Esperando QR", len(listos_sin_llegar))
+            st.metric("🔔 LISTOS PARA RETIRAR", len(listos_sin_llegar))
         with c_ref:
-            if st.button("🔄 Refrescar", key="btn_refresh_cocina"):
+            st.write("")
+            if st.button("🔄 Actualizar", key="btn_refresh_cocina", use_container_width=True):
                 st.rerun()
 
+        st.markdown("---")
+
+        # =========================================================
+        # BLOQUE 1: CLIENTES QUE YA LLEGARON A RETIRAR (PRIORIDAD)
+        # =========================================================
         if clientes_esperando:
-            st.error(f"🚨 ¡ATENCIÓN COCINA! Hay **{len(clientes_esperando)} cliente(s)** esperando retiro en el mesón:")
+            st.error(f"🚨 ¡ATENCIÓN! Hay **{len(clientes_esperando)} persona(s)** esperando en el mesón para retirar:")
             for order in clientes_esperando:
                 with st.container(border=True):
-                    col_alerta, col_ent = st.columns([3.5, 1.5])
+                    col_alerta, col_ent = st.columns([2.6, 1.4])
                     with col_alerta:
-                        st.markdown(f"### 📣 `{order['id']}` — 👤 **{order['cliente']}** (Franja `{order['franja']}`)")
-                        st.write(f"**Entregar:** {order['detalle_productos']} | Escaneó QR a las `{order.get('hora_llegada_cliente', '-')}`")
+                        st.markdown(
+                            f"<div class='cocina-titulo-pedido'>📣 {order['cliente']} — Pedido {order['id']}</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f"<div class='cocina-detalle-comida' style='border-left-color: #dc3545; background-color: #fff5f5;'>"
+                            f"🍽️ ENTREGAR: {order['detalle_productos']}</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f"<div class='cocina-subdato'>⏰ Franja: {order['franja']} | Llegó al mesón: {order.get('hora_llegada_cliente', '-')}</div>",
+                            unsafe_allow_html=True
+                        )
                     with col_ent:
+                        st.write("")
                         if st.button(
-                            "🤝 Confirmar Entregado",
+                            "🤝 ENTREGAR PEDIDO",
                             key=f"cocina_entregar_{order['id']}",
                             type="primary",
                             use_container_width=True
                         ):
                             actualizar_estado_pedido(order, "Entregado")
-                            st.toast(f"Pedido {order['id']} entregado a {order['cliente']}.")
+                            st.toast(f"✅ Pedido {order['id']} entregado a {order['cliente']}.")
                             st.rerun()
             st.markdown("---")
 
-        tab_prep, tab_listos, tab_hist = st.tabs([
-            f"👨‍🍳 En Preparación por Franja ({len(en_preparacion)})",
-            f"🔔 Listos Esperando Llegada ({len(listos_sin_llegar)})",
-            f"📁 Entregados / Historial ({len(historial_cerrados)})"
-        ])
+        # =========================================================
+        # BLOQUE 2: PEDIDOS POR PREPARAR (ORDENADOS POR FRANJA)
+        # =========================================================
+        st.markdown("## 👨‍🍳 1. Pedidos por Preparar")
+        if not en_preparacion:
+            st.success("✅ No hay pedidos pendientes de preparación en este momento.")
+        else:
+            for slot in TIME_SLOTS:
+                ordenes_slot = [o for o in en_preparacion if o["franja"] == slot]
+                if ordenes_slot:
+                    st.markdown(f"### ⏰ Horario de Retiro: **{slot}** ({len(ordenes_slot)} pedido/s)")
+                    for order in ordenes_slot:
+                        with st.container(border=True):
+                            c_txt, c_btn = st.columns([2.6, 1.4])
+                            with c_txt:
+                                st.markdown(
+                                    f"<div class='cocina-titulo-pedido'>📦 {order['id']} — 👤 {order['cliente']}</div>",
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    f"<div class='cocina-detalle-comida'>🍽️ PREPARAR: {order['detalle_productos']}</div>",
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    f"<div class='cocina-subdato'>Pagado a las {order.get('hora_pago', '-')}</div>",
+                                    unsafe_allow_html=True
+                                )
+                            with c_btn:
+                                st.write("")
+                                if st.button(
+                                    "🔔 MARCAR LISTO",
+                                    key=f"cocina_listo_{order['id']}",
+                                    type="secondary",
+                                    use_container_width=True
+                                ):
+                                    actualizar_estado_pedido(order, "Listo")
+                                    st.toast(f"🔔 Pedido {order['id']} listo para retirar.")
+                                    st.rerun()
 
-        with tab_prep:
-            if not en_preparacion:
-                st.info("No hay pedidos pagados pendientes de preparación.")
-            else:
-                for slot in TIME_SLOTS:
-                    ordenes_slot = [o for o in en_preparacion if o["franja"] == slot]
-                    cupos_usados = contar_cupos_ocupados_franja(slot)
-                    st.markdown(f"### ⏰ Franja {slot} — Cupos reservados: {cupos_usados}/{LIMIT_PER_SLOT}")
-                    if not ordenes_slot:
-                        st.caption("Sin pedidos en preparación para esta franja.")
+        st.markdown("---")
+
+        # =========================================================
+        # BLOQUE 3: PEDIDOS YA LISTOS ESPERANDO QUE LLEGUE EL ALUMNO
+        # =========================================================
+        st.markdown("## 🔔 2. Pedidos Listos (Esperando al Estudiante)")
+        if not listos_sin_llegar:
+            st.info("No hay pedidos listos esperando retiro.")
+        else:
+            for order in listos_sin_llegar:
+                with st.container(border=True):
+                    c_l1, c_l2 = st.columns([2.6, 1.4])
+                    with c_l1:
+                        st.markdown(
+                            f"<div class='cocina-titulo-pedido'>🔔 {order['id']} — 👤 {order['cliente']}</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f"<div class='cocina-detalle-comida' style='border-left-color: #198754;'>"
+                            f"🍽️ LISTO: {order['detalle_productos']}</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f"<div class='cocina-subdato'>⏰ Franja: {order['franja']} | Listo desde las {order.get('hora_listo', '-')}</div>",
+                            unsafe_allow_html=True
+                        )
+                    with c_l2:
+                        st.write("")
+                        if st.button(
+                            "🤝 ENTREGAR AHORA",
+                            key=f"cocina_ent_man_{order['id']}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            actualizar_estado_pedido(order, "Entregado")
+                            st.toast(f"✅ Pedido {order['id']} entregado.")
+                            st.rerun()
+
+        # Herramientas secundarias colapsadas abajo para no distraer
+        st.markdown("---")
+        with st.expander("📷 Escáner QR de Llegada (Cámara / Lector Óptico)", expanded=False):
+            col_cam, col_man = st.columns([1.2, 1])
+            with col_cam:
+                foto_qr = st.camera_input("Escanea el QR del estudiante", key="cam_cocina_qr")
+                if foto_qr is not None:
+                    texto_qr = decodificar_qr_imagen(foto_qr)
+                    if texto_qr:
+                        tipo_res, msg_res = procesar_escaneo_qr_totem(texto_qr)
+                        if tipo_res == "success":
+                            st.success(msg_res)
+                        elif tipo_res == "warning":
+                            st.warning(msg_res)
+                        elif tipo_res == "info":
+                            st.info(msg_res)
+                        else:
+                            st.error(msg_res)
                     else:
-                        for order in ordenes_slot:
-                            with st.container(border=True):
-                                c_txt, c_btn = st.columns([3.5, 1.5])
-                                with c_txt:
-                                    st.markdown(f"#### 📦 `{order['id']}` — 👤 **{order['cliente']}**")
-                                    st.write(f"**Preparar:** {order['detalle_productos']} ({order.get('cantidad_total', 1)} cupo/s)")
-                                    st.caption(f"Pagado a las: {order.get('hora_pago', '-')} | TX: `{order['tx_id']}` ({order['pago']})")
-                                with c_btn:
-                                    if st.button(
-                                        "🔔 Marcar Listo",
-                                        key=f"cocina_listo_{order['id']}",
-                                        type="primary",
-                                        use_container_width=True
-                                    ):
-                                        actualizar_estado_pedido(order, "Listo")
-                                        st.toast(f"Pedido {order['id']} marcado como LISTO.")
-                                        st.rerun()
-                    st.markdown("---")
+                        st.warning("No se detectó un código QR claro. Acerca el teléfono e intenta de nuevo.")
 
-        with tab_listos:
-            if not listos_sin_llegar:
-                st.info("No hay pedidos listos esperando llegada del estudiante.")
-            else:
-                st.caption("Estos pedidos ya están terminados. Cuando el estudiante escanee su QR aparecerán en la alerta superior (o puedes entregarlos manualmente aquí).")
-                for order in listos_sin_llegar:
-                    with st.container(border=True):
-                        c_l1, c_l2 = st.columns([3.5, 1.5])
-                        with c_l1:
-                            st.markdown(f"#### 🔔 `{order['id']}` — 👤 **{order['cliente']}** (Franja `{order['franja']}`)")
-                            st.write(f"**Detalle:** {order['detalle_productos']} | Listo desde: `{order.get('hora_listo', '-')}`")
-                        with c_l2:
-                            if st.button(
-                                "🤝 Entregar Manualmente",
-                                key=f"cocina_ent_man_{order['id']}",
-                                use_container_width=True
-                            ):
-                                actualizar_estado_pedido(order, "Entregado")
-                                st.rerun()
+            with col_man:
+                token_manual = st.text_input(
+                    "Lectura por pistola USB:",
+                    placeholder="DOMEYKO-QR|ORD-1234|TX-XXXXXX",
+                    key="input_lector_cocina"
+                ).strip()
+                if st.button("Registrar Llegada QR", key="btn_validar_cocina"):
+                    if token_manual:
+                        tipo_res, msg_res = procesar_escaneo_qr_totem(token_manual)
+                        if tipo_res == "success":
+                            st.success(msg_res)
+                        elif tipo_res == "warning":
+                            st.warning(msg_res)
+                        elif tipo_res == "info":
+                            st.info(msg_res)
+                        else:
+                            st.error(msg_res)
 
-        with tab_hist:
+        with st.expander(f"📁 Ver Pedidos Ya Entregados Hoy ({len(historial_cerrados)})", expanded=False):
             if not historial_cerrados:
-                st.info("Aún no hay pedidos entregados o descartados.")
+                st.info("Aún no hay pedidos entregados hoy.")
             else:
                 for order in reversed(historial_cerrados):
-                    with st.container(border=True):
-                        st.markdown(f"**`{order['id']}` — {order['cliente']}** | Franja: `{order['franja']}` | Estado: **{order['estado'].upper()}**")
-                        st.caption(f"Detalle: {order['detalle_productos']} | Cierre: {order['hora_entrega']}")
+                    st.write(f"✔️ **{order['id']} — {order['cliente']}** | {order['detalle_productos']} | Estado: **{order['estado']}** ({order['hora_entrega']})")
 
     panel_cocina_vivo()
 
