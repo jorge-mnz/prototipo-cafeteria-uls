@@ -6,6 +6,8 @@ import io
 import os
 import time
 import qrcode
+import cv2
+import numpy as np
 from datetime import datetime
 
 # Configuración de página
@@ -129,6 +131,38 @@ def generar_qr_image(data_text: str):
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+def decodificar_qr_imagen(uploaded_img) -> str:
+    file_bytes = np.asarray(bytearray(uploaded_img.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if img is None:
+        return ""
+    detector = cv2.QRCodeDetector()
+    data, _, _ = detector.detectAndDecode(img)
+    return data.strip() if data else ""
+
+def validar_y_entregar_token_qr(token: str):
+    if not token.startswith("DOMEYKO-QR|"):
+        return "error", "❌ Formato de QR no reconocido por Domeyko GO."
+    
+    partes = token.split("|")
+    oid_esc = partes[1] if len(partes) > 1 else ""
+    tx_esc = partes[2] if len(partes) > 2 else ""
+    pedido_obj = next(
+        (o for o in db_orders if o["id"] == oid_esc and o["tx_id"] == tx_esc),
+        None
+    )
+
+    if not pedido_obj:
+        return "error", "❌ Código QR no corresponde a ninguna orden registrada en el sistema."
+    if pedido_obj["estado"] == "Entregado":
+        return "warning", f"⚠️ El pedido **{oid_esc}** ({pedido_obj['cliente']}) ya fue entregado a las {pedido_obj['hora_entrega']}."
+    if pedido_obj["estado"] == "Descartado":
+        return "error", f"❌ El pedido **{oid_esc}** fue descartado y no es válido para retiro."
+
+    pedido_obj["estado"] = "Entregado"
+    pedido_obj["hora_entrega"] = datetime.now().strftime("%H:%M:%S")
+    return "success", f"✅ QR válido: Pedido **{oid_esc}** de **{pedido_obj['cliente']}** ({pedido_obj['detalle_productos']}) marcado como ENTREGADO."
+
 @st.dialog("🎉 ¡Pedido Confirmado Exitosamente!")
 def mostrar_popup_confirmacion(pedido: dict):
     st.success(f"Gracias **{pedido['cliente']}**, tu orden ya ingresó a cocina.")
@@ -138,9 +172,9 @@ def mostrar_popup_confirmacion(pedido: dict):
         st.write(f"**Franja de retiro:** {pedido['franja']}")
         st.write(f"**Detalle:** {pedido['detalle_productos']}")
         st.write(f"**Total pagado:** {formato_clp(pedido['precio'])} ({pedido['pago']})")
-        st.info("Puedes cerrar esta ventana y revisar el avance en tiempo real más arriba.")
+        st.info("Muestra este QR en el mesón de entrega al retirar tu pedido.")
     with col_qr:
-        qr_bytes = generar_qr_image(f"PEDIDO:{pedido['id']}|CLIENTE:{pedido['cliente']}|FRANJA:{pedido['franja']}")
+        qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
         st.image(qr_bytes, caption=pedido["id"], width=130)
 
     if st.button("Entendido, ver seguimiento", type="primary", use_container_width=True):
@@ -167,13 +201,13 @@ def mostrar_tarjeta_seguimiento(pedido: dict):
             elif estado == "En preparación":
                 st.warning("👨‍🍳 Estado: **En preparación** (Tu pedido se está armando)")
             elif estado == "Listo":
-                st.success("✅ Estado: **¡LISTO PARA RETIRAR!** Acércate al mesón de entrega.")
+                st.success("✅ Estado: **¡LISTO PARA RETIRAR!** Acércate al mesón de entrega y muestra tu QR.")
             elif estado == "Entregado":
                 st.write(f"✔️ Estado: **Entregado** (Retirado a las {pedido['hora_entrega']})")
             elif estado == "Descartado":
                 st.error("❌ Estado: **Descartado / Cancelado** (Acércate al mesón de atención para más detalles)")
         with col_qr:
-            qr_bytes = generar_qr_image(f"PEDIDO:{pedido['id']}|CLIENTE:{pedido['cliente']}|FRANJA:{pedido['franja']}")
+            qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
             st.image(qr_bytes, caption=pedido["id"], width=120)
 
 def verificar_login_personal() -> bool:
@@ -225,7 +259,6 @@ if st.session_state.personal_autenticado:
 # VISTA 1: ESTUDIANTE
 # ==========================================
 if modo == "📱 Estudiante (Realizar Pedido)":
-    # Mostrar pop-up si se acaba de confirmar un pedido
     if st.session_state.pedido_popup is not None:
         pedido_recien_creado = st.session_state.pedido_popup
         st.session_state.pedido_popup = None
@@ -451,6 +484,43 @@ elif modo == "🍳 Personal Cafetería (KDS)":
     """, unsafe_allow_html=True)
 
     st.title("🍳 Pantalla de Control - Personal de Cafetería")
+
+    # Lector QR exclusivo para personal autorizado (fuera del fragmento auto-refrescable para no cortar la cámara)
+    with st.expander("📷 Escanear QR en Mesón para Entrega Rápida", expanded=False):
+        st.caption("Solo operativo dentro de la sesión del personal. Escanear el QR con una cámara externa normal no ejecuta acciones.")
+        col_cam, col_man = st.columns([1.2, 1])
+
+        with col_cam:
+            foto_qr = st.camera_input("Apunta la cámara al QR del estudiante", key="cam_kds_qr")
+            if foto_qr is not None:
+                texto_qr = decodificar_qr_imagen(foto_qr)
+                if texto_qr:
+                    tipo_res, msg_res = validar_y_entregar_token_qr(texto_qr)
+                    if tipo_res == "success":
+                        st.success(msg_res)
+                    elif tipo_res == "warning":
+                        st.warning(msg_res)
+                    else:
+                        st.error(msg_res)
+                else:
+                    st.warning("No se detectó un código QR nítido. Acerca el celular a la cámara y vuelve a capturar.")
+
+        with col_man:
+            st.markdown("**Lectura por pistola USB / ingreso manual:**")
+            token_manual = st.text_input(
+                "Escanea aquí con lector óptico:",
+                placeholder="DOMEYKO-QR|ORD-1234|TX-XXXXXX",
+                key="input_lector_usb"
+            ).strip()
+            if st.button("Validar y Entregar Token", key="btn_validar_token"):
+                if token_manual:
+                    tipo_res, msg_res = validar_y_entregar_token_qr(token_manual)
+                    if tipo_res == "success":
+                        st.success(msg_res)
+                    elif tipo_res == "warning":
+                        st.warning(msg_res)
+                    else:
+                        st.error(msg_res)
 
     def renderizar_tarjeta_kds(order: dict, prefix_key: str):
         with st.container(border=True):
