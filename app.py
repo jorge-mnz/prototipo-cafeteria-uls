@@ -144,6 +144,9 @@ if "pago_elegido" not in st.session_state:
 if "escaner_abierto" not in st.session_state:
     st.session_state.escaner_abierto = False
 
+if "ultimo_resultado_qr" not in st.session_state:
+    st.session_state.ultimo_resultado_qr = None
+
 # ==========================================
 # FUNCIONES AUXILIARES
 # ==========================================
@@ -266,8 +269,17 @@ def procesar_escaneo_qr_totem(token: str):
     actualizar_estado_pedido(pedido_obj, "Cliente en mesón")
     return "success", f"📣 ¡Notificación enviada a cocina! **{pedido_obj['cliente']}** (Pedido **{oid_esc}**) está esperando retiro en mesón."
 
+# Procesar inmediatamente si llegó un QR escaneado vía query_params
+if "qr_scan" in st.query_params:
+    token_url = st.query_params["qr_scan"]
+    del st.query_params["qr_scan"]
+    tipo_qr, msg_qr = procesar_escaneo_qr_totem(token_url)
+    st.session_state.ultimo_resultado_qr = (tipo_qr, msg_qr)
+    if tipo_qr == "success":
+        st.session_state.escaner_abierto = False
+
 def renderizar_escaner_qr_en_vivo():
-    """Inyecta lector QR continuo en navegador sin necesidad de tomar foto."""
+    """Inyecta lector QR continuo en navegador y envía el token vía URL query param."""
     html_scanner = """
     <div id="qr-wrapper" style="font-family: sans-serif; text-align: center; padding: 8px;">
         <div id="reader" style="width: 100%; max-width: 460px; margin: 0 auto; border-radius: 12px; overflow: hidden; border: 3px solid #0d6efd;"></div>
@@ -283,35 +295,14 @@ def renderizar_escaner_qr_en_vivo():
         function onScanSuccess(decodedText, decodedResult) {
             if (yaDetectado) return;
             yaDetectado = true;
-            document.getElementById("qr-status").innerText = "✅ ¡QR detectado! Procesando...";
+            document.getElementById("qr-status").innerText = "✅ ¡QR detectado! Avisando a cocina...";
             document.getElementById("qr-status").style.color = "#198754";
 
-            html5QrCode.stop().then(() => {
-                // Escribir en el campo de texto de Streamlit y presionar el botón de validación
-                const parentDoc = window.parent.document;
-                const inputs = parentDoc.querySelectorAll('input[type="text"]');
-                let targetInput = null;
-                inputs.forEach(inp => {
-                    if (inp.placeholder && inp.placeholder.includes("DOMEYKO-QR")) {
-                        targetInput = inp;
-                    }
-                });
-
-                if (targetInput) {
-                    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                    nativeInputValueSetter.call(targetInput, decodedText);
-                    targetInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-                    setTimeout(() => {
-                        const buttons = parentDoc.querySelectorAll('button');
-                        buttons.forEach(btn => {
-                            if (btn.innerText && btn.innerText.includes("VALIDAR CÓDIGO QR")) {
-                                btn.click();
-                            }
-                        });
-                    }, 200);
-                }
-            }).catch(err => console.error(err));
+            html5QrCode.stop().catch(() => {}).finally(() => {
+                const parentUrl = new URL(window.parent.location.href);
+                parentUrl.searchParams.set("qr_scan", decodedText);
+                window.parent.location.href = parentUrl.toString();
+            });
         }
 
         html5QrCode.start(
@@ -472,12 +463,15 @@ if MODO_PRUEBAS:
     st.sidebar.warning("🧪 ENTORNO DE PRUEBAS")
 
 st.sidebar.title("📌 Menú de Navegación")
-modo = st.sidebar.radio("Selecciona la vista:", [
+
+opciones_vista = [
     "📱 Estudiante (Realizar Pedido)",
     "💵 Caja (Aprobación y Stock)",
     "🍳 Cocina (Preparación y Entrega)",
     "📊 Panel de Métricas / Exportación"
-])
+]
+idx_default = 2 if st.session_state.ultimo_resultado_qr is not None else 0
+modo = st.sidebar.radio("Selecciona la vista:", opciones_vista, index=idx_default)
 
 if st.session_state.personal_autenticado:
     st.sidebar.markdown("---")
@@ -503,6 +497,7 @@ if st.session_state.personal_autenticado:
         st.session_state.franja_elegida = None
         st.session_state.pago_elegido = None
         st.session_state.escaner_abierto = False
+        st.session_state.ultimo_resultado_qr = None
         config_op["productos_agotados"] = {prod: False for prod in MENU.keys()}
         st.toast("✅ Pedidos y encuestas eliminados, stock restaurado y cupos reiniciados.")
         st.rerun()
@@ -1042,6 +1037,19 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
     st.markdown("# 🍳 Pantalla de Cocina")
     st.markdown("#### Instrucciones rápidas: **1)** Prepara el pedido y toca **🔔 MARCAR LISTO**. **2)** Cuando llegue el estudiante, toca **🤝 ENTREGAR PEDIDO**.")
 
+    # Mostrar alerta si se acaba de escanear un QR
+    if st.session_state.ultimo_resultado_qr is not None:
+        tipo_res, msg_res = st.session_state.ultimo_resultado_qr
+        st.session_state.ultimo_resultado_qr = None
+        if tipo_res == "success":
+            st.success(msg_res)
+        elif tipo_res == "warning":
+            st.warning(msg_res)
+        elif tipo_res == "info":
+            st.info(msg_res)
+        else:
+            st.error(msg_res)
+
     @st.fragment(run_every=REFRESH_OPERACION)
     def panel_cocina_vivo():
         clientes_esperando = [o for o in db_orders if o["estado"] == "Cliente en mesón"]
@@ -1230,16 +1238,10 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
                 ):
                     if token_manual:
                         tipo_res, msg_res = procesar_escaneo_qr_totem(token_manual)
+                        st.session_state.ultimo_resultado_qr = (tipo_res, msg_res)
                         if tipo_res == "success":
                             st.session_state.escaner_abierto = False
-                            st.toast(msg_res)
-                            st.rerun()
-                        elif tipo_res == "warning":
-                            st.warning(msg_res)
-                        elif tipo_res == "info":
-                            st.info(msg_res)
-                        else:
-                            st.error(msg_res)
+                        st.rerun()
 
 # ==========================================
 # VISTA 4: MÉTRICAS Y EXPORTACIÓN
