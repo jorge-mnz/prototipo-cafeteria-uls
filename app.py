@@ -21,6 +21,10 @@ st.set_page_config(page_title="Domeyko GO - Casino ULS", page_icon="🍔", layou
 # False -> Versión Oficial: oculta el interruptor y exige siempre pedir antes del inicio de la franja.
 MODO_PRUEBAS = True
 
+# Color de fondo opcional (deja None para usar el tema por defecto de Streamlit)
+# Ejemplos: "#161b22" (oscuro azulado suave), "#1a1817" (oscuro cálido), "#f8f9fa" (claro limpio)
+COLOR_FONDO_APP = None
+
 CLAVE_PERSONAL = "domeyko2026"  # Contraseña para Caja, Cocina y Métricas
 LIMIT_PER_SLOT = 10             # Máximo 10 unidades/cupos por franja de 15 min
 MAX_ITEMS_CARRITO = 3           # Máximo 3 productos por pedido
@@ -74,6 +78,18 @@ MENU = {
     }
 }
 
+if COLOR_FONDO_APP:
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-color: {COLOR_FONDO_APP};
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
 # ==========================================
 # ESTADO COMPARTIDO EN SERVIDOR
 # ==========================================
@@ -120,6 +136,12 @@ if "pedido_popup" not in st.session_state:
 
 if "carrito" not in st.session_state:
     st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
+
+if "franja_elegida" not in st.session_state:
+    st.session_state.franja_elegida = None
+
+if "pago_elegido" not in st.session_state:
+    st.session_state.pago_elegido = None
 
 # ==========================================
 # FUNCIONES AUXILIARES
@@ -419,6 +441,8 @@ if st.session_state.personal_autenticado:
         st.session_state.pedidos_notificados_aprobados.clear()
         st.session_state.pedidos_notificados_listos.clear()
         st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
+        st.session_state.franja_elegida = None
+        st.session_state.pago_elegido = None
         config_op["productos_agotados"] = {prod: False for prod in MENU.keys()}
         st.toast("✅ Pedidos y encuestas eliminados, stock restaurado y cupos reiniciados.")
         st.rerun()
@@ -431,6 +455,28 @@ if st.session_state.personal_autenticado:
 # VISTA 1: ESTUDIANTE
 # ==========================================
 if modo == "📱 Estudiante (Realizar Pedido)":
+    # Estilos personalizados para input de nombre más grande y tarjetas interactivas
+    st.markdown("""
+        <style>
+        /* Agrandar el cuadro de texto para el nombre del estudiante */
+        div[data-testid="stTextInput"] input {
+            font-size: 19px !important;
+            min-height: 54px !important;
+            padding: 12px 16px !important;
+            border-radius: 10px !important;
+            border: 2px solid #4a5568 !important;
+        }
+        div[data-testid="stTextInput"] input:focus {
+            border-color: #28a745 !important;
+            box-shadow: 0 0 0 2px rgba(40, 167, 69, 0.25) !important;
+        }
+        div[data-testid="stTextInput"] label p {
+            font-size: 17px !important;
+            font-weight: 700 !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     if st.session_state.pedido_popup is not None:
         pedido_recien_creado = st.session_state.pedido_popup
         st.session_state.pedido_popup = None
@@ -444,7 +490,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
     st.subheader("Sistema de Pedidos Anticipados por QR")
 
     # 1) Catálogo con tarjetas visuales estilo menú (2 columnas)
-    st.markdown("### 🛍️ Arma tu Pedido")
+    st.markdown("### 🛍️ 1. Arma tu Pedido")
     
     for prod, esta_agotado in config_op["productos_agotados"].items():
         if esta_agotado and st.session_state.carrito[prod] > 0:
@@ -499,72 +545,141 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             st.markdown(f"**🛒 Resumen del Carrito ({total_items_carrito}/{MAX_ITEMS_CARRITO} productos = {total_items_carrito} cupo/s):** " + " + ".join(resumen_items))
             st.markdown(f"**Total Estimado:** {formato_clp(total_pagar)} *(se paga una vez que Caja confirme stock)*")
 
-    # 2) Datos del estudiante y franja horaria
-    st.markdown("### 📝 Datos de Retiro y Medio de Pago")
-    nombre_cliente = st.text_input("Tu Nombre y Apellido (para llamarte en el mesón):", placeholder="Ej. Camila Rojas")
+    # 2) Datos del estudiante (Campo grande)
+    st.markdown("### 📝 2. Identificación para Retiro")
+    nombre_cliente = st.text_input(
+        "👤 Tu Nombre y Apellido (para llamarte en el mesón):",
+        placeholder="Escribe aquí tu nombre y apellido (Ej. Camila Rojas)..."
+    )
+
+    # 3) Selector de Franja Horaria mediante TARJETAS INTERACTIVAS
+    st.markdown("### ⏰ 3. Toca la Franja Horaria de Retiro")
 
     @st.fragment(run_every=REFRESH_CUPOS_ESTUDIANTE)
-    def selector_franja_vivo():
+    def selector_franja_botones():
         col_f_titulo, col_f_btn = st.columns([4, 1])
         with col_f_titulo:
-            st.markdown("**Selecciona la Franja Horaria de Retiro**")
             if config_op.get("validar_horario", True):
-                st.caption(f"Hora actual: **{ahora_chile().strftime('%H:%M')}** — Solo puedes reservar franjas que aún no han comenzado.")
+                st.caption(f"Hora actual: **{ahora_chile().strftime('%H:%M')}** — Toca una tarjeta disponible para seleccionarla.")
+            else:
+                st.caption("Toca una tarjeta de horario para seleccionarla.")
         with col_f_btn:
-            if st.button("🔄 Cupos", key="btn_refresh_cupos"):
+            if st.button("🔄 Cupos", key="btn_refresh_cupos", use_container_width=True):
                 st.rerun()
-        
+
+        # Validar que la franja actualmente elegida siga abierta y con cupos
+        franja_actual = st.session_state.franja_elegida
+        if franja_actual:
+            libres_actual = max(0, LIMIT_PER_SLOT - contar_cupos_ocupados_franja(franja_actual))
+            if franja_esta_cerrada_por_hora(franja_actual) or libres_actual == 0:
+                st.session_state.franja_elegida = None
+                franja_actual = None
+
+        # Si no hay ninguna seleccionada aún, preseleccionar automáticamente la primera disponible
+        if franja_actual is None:
+            for s in TIME_SLOTS:
+                if not franja_esta_cerrada_por_hora(s) and (LIMIT_PER_SLOT - contar_cupos_ocupados_franja(s)) > 0:
+                    st.session_state.franja_elegida = s
+                    franja_actual = s
+                    break
+
         cols = st.columns(len(TIME_SLOTS))
         for idx, slot in enumerate(TIME_SLOTS):
             libres = max(0, LIMIT_PER_SLOT - contar_cupos_ocupados_franja(slot))
             cerrada_hora = franja_esta_cerrada_por_hora(slot)
+            sin_cupos = (libres == 0)
+            deshabilitada = cerrada_hora or sin_cupos
+            es_seleccionada = (st.session_state.franja_elegida == slot) and not deshabilitada
+
             with cols[idx]:
-                if cerrada_hora:
-                    st.metric(label=slot, value="CERRADA", delta="Fuera de hora", delta_color="off")
-                else:
-                    st.metric(
-                        label=slot,
-                        value=f"{libres} / {LIMIT_PER_SLOT}",
-                        delta="Disponible" if libres > 0 else "Agotado",
-                        delta_color="normal" if libres > 0 else "off"
-                    )
+                with st.container(border=True):
+                    if es_seleccionada:
+                        st.markdown(f":green[**✅ {slot}**]")
+                    else:
+                        st.markdown(f"**{slot}**")
 
-        def formatear_franja(slot):
-            if franja_esta_cerrada_por_hora(slot):
-                return f"{slot} (CERRADA - Ya inició el horario)"
-            libres = max(0, LIMIT_PER_SLOT - contar_cupos_ocupados_franja(slot))
-            if libres > 0:
-                return f"{slot} ({libres} cupos disponibles)"
-            return f"{slot} (AGOTADO)"
+                    if cerrada_hora:
+                        st.markdown("### CERRADA")
+                        st.caption("🔴 Fuera de hora")
+                        texto_boton = "Cerrada"
+                    elif sin_cupos:
+                        st.markdown("### 0 / 10")
+                        st.caption("🔴 Sin cupos")
+                        texto_boton = "Agotado"
+                    else:
+                        st.markdown(f"### {libres} / {LIMIT_PER_SLOT}")
+                        st.caption("🟢 Disponible")
+                        texto_boton = "Seleccionado" if es_seleccionada else "Elegir horario"
 
-        st.selectbox(
-            "Franjas de retiro disponibles:",
-            options=TIME_SLOTS,
-            format_func=formatear_franja,
-            key="franja_elegida"
-        )
+                    if st.button(
+                        texto_boton,
+                        key=f"btn_slot_{idx}",
+                        type="primary" if es_seleccionada else "secondary",
+                        disabled=deshabilitada,
+                        use_container_width=True
+                    ):
+                        st.session_state.franja_elegida = slot
+                        st.rerun()
 
-    selector_franja_vivo()
+    selector_franja_botones()
 
-    # Reglas dinámicas de medio de pago según el carrito
+    # 4) Selector de Medio de Pago mediante BOTONES INTERACTIVOS
+    st.markdown("### 💳 4. Toca tu Medio de Pago")
     seleccionados = [prod for prod, cant in st.session_state.carrito.items() if cant > 0]
     tiene_no_baes = any(not MENU[p]["baes"] for p in seleccionados)
     tiene_solo_baes = any(MENU[p]["solo_baes"] for p in seleccionados)
+
+    iconos_pago = {
+        "Débito / Crédito": "💳",
+        "Efectivo en Caja": "💵",
+        "BAES / JUNAEB": "🎓"
+    }
+    desc_pago = {
+        "Débito / Crédito": "Tarjeta bancaria",
+        "Efectivo en Caja": "Pagar en mesón",
+        "BAES / JUNAEB": "Tarjeta Junaeb"
+    }
 
     if tiene_solo_baes and tiene_no_baes:
         st.error("⚠️ No puedes mezclar 'Menú BAES' con 'Colación' en el mismo pedido porque tienen medios de pago incompatibles.")
         metodos_pago = []
     elif tiene_solo_baes:
         metodos_pago = ["BAES / JUNAEB"]
-        st.info("💳 Tu carrito incluye 'Menú BAES', por lo que el pago será con tarjeta BAES / JUNAEB tras aprobarse.")
+        st.info("🎓 Tu carrito incluye 'Menú BAES', por lo que el pago es exclusivo con tarjeta BAES / JUNAEB.")
     elif tiene_no_baes:
         metodos_pago = ["Débito / Crédito", "Efectivo en Caja"]
         st.warning("⚠️ Nota: El producto 'Colación' no admite pago con tarjeta BAES / JUNAEB.")
     else:
         metodos_pago = ["Débito / Crédito", "Efectivo en Caja", "BAES / JUNAEB"]
 
-    pago_sel = st.selectbox("¿Cómo pagarás una vez aprobado el stock?:", metodos_pago if metodos_pago else ["Sin medios compatibles"])
+    # Sincronizar selección de pago con los métodos válidos
+    if not metodos_pago:
+        st.session_state.pago_elegido = None
+    elif st.session_state.pago_elegido not in metodos_pago:
+        st.session_state.pago_elegido = metodos_pago[0]
 
+    if metodos_pago:
+        cols_pago = st.columns(len(metodos_pago))
+        for idx_p, metodo in enumerate(metodos_pago):
+            es_pago_sel = (st.session_state.pago_elegido == metodo)
+            with cols_pago[idx_p]:
+                with st.container(border=True):
+                    icono = iconos_pago.get(metodo, "💳")
+                    if es_pago_sel:
+                        st.markdown(f":green[**✅ {icono} {metodo}**]")
+                    else:
+                        st.markdown(f"**{icono} {metodo}**")
+                    st.caption(desc_pago.get(metodo, ""))
+                    if st.button(
+                        "Seleccionado" if es_pago_sel else "Elegir medio",
+                        key=f"btn_pago_{metodo}",
+                        type="primary" if es_pago_sel else "secondary",
+                        use_container_width=True
+                    ):
+                        st.session_state.pago_elegido = metodo
+                        st.rerun()
+
+    st.markdown("---")
     ahora_ts = time.time()
     segundos_transcurridos = ahora_ts - st.session_state.ultimo_pedido_ts
     en_cooldown = segundos_transcurridos < COOLDOWN_SEGUNDOS
@@ -573,8 +688,18 @@ if modo == "📱 Estudiante (Realizar Pedido)":
     if en_cooldown:
         st.warning(f"⏳ Control anti-spam: debes esperar **{segundos_restantes} segundos** antes de enviar otra solicitud desde este dispositivo.")
 
-    if st.button("Enviar Solicitud a Caja (Sin cobro aún)", type="primary", disabled=(total_items_carrito == 0 or not metodos_pago or en_cooldown)):
-        franja_sel = st.session_state.get("franja_elegida", TIME_SLOTS[0])
+    franja_sel = st.session_state.franja_elegida
+    pago_sel = st.session_state.pago_elegido
+
+    if franja_sel and pago_sel and total_items_carrito > 0:
+        st.caption(f"Resumen listo: Franja **{franja_sel}** | Medio de pago **{pago_sel}**")
+
+    if st.button(
+        "📩 Enviar Solicitud a Caja (Sin cobro aún)",
+        type="primary",
+        disabled=(total_items_carrito == 0 or not metodos_pago or not franja_sel or en_cooldown),
+        use_container_width=True
+    ):
         cupos_libres_reales = LIMIT_PER_SLOT - contar_cupos_ocupados_franja(franja_sel)
         productos_sin_stock = [p for p in seleccionados if config_op["productos_agotados"].get(p, False)]
 
@@ -618,7 +743,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             st.session_state.pedido_popup = nuevo_pedido
             st.rerun()
 
-    # 3) Seguimiento en vivo abajo (justo después de enviar/pagar el pedido)
+    # 5) Seguimiento en vivo abajo (justo después de enviar/pagar el pedido)
     intervalo_seguimiento = REFRESH_SEGUIMIENTO_ESTUDIANTE if st.session_state.mis_pedidos else None
 
     @st.fragment(run_every=intervalo_seguimiento)
