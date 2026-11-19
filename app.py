@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import random
 import string
 import pandas as pd
@@ -6,8 +7,6 @@ import io
 import os
 import time
 import qrcode
-import cv2
-import numpy as np
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -22,7 +21,6 @@ st.set_page_config(page_title="Domeyko GO - Casino ULS", page_icon="🍔", layou
 MODO_PRUEBAS = True
 
 # Color de fondo opcional (deja None para usar el tema por defecto de Streamlit)
-# Ejemplos: "#161b22" (oscuro azulado suave), "#1a1817" (oscuro cálido), "#f8f9fa" (claro limpio)
 COLOR_FONDO_APP = None
 
 CLAVE_PERSONAL = "domeyko2026"  # Contraseña para Caja, Cocina y Métricas
@@ -143,6 +141,9 @@ if "franja_elegida" not in st.session_state:
 if "pago_elegido" not in st.session_state:
     st.session_state.pago_elegido = None
 
+if "escaner_abierto" not in st.session_state:
+    st.session_state.escaner_abierto = False
+
 # ==========================================
 # FUNCIONES AUXILIARES
 # ==========================================
@@ -236,15 +237,6 @@ def generar_qr_image(data_text: str):
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-def decodificar_qr_imagen(uploaded_img) -> str:
-    file_bytes = np.asarray(bytearray(uploaded_img.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if img is None:
-        return ""
-    detector = cv2.QRCodeDetector()
-    data, _, _ = detector.detectAndDecode(img)
-    return data.strip() if data else ""
-
 def procesar_escaneo_qr_totem(token: str):
     """Notifica a cocina que el cliente llegó al punto de escaneo con su QR."""
     if not token.startswith("DOMEYKO-QR|"):
@@ -273,6 +265,73 @@ def procesar_escaneo_qr_totem(token: str):
 
     actualizar_estado_pedido(pedido_obj, "Cliente en mesón")
     return "success", f"📣 ¡Notificación enviada a cocina! **{pedido_obj['cliente']}** (Pedido **{oid_esc}**) está esperando retiro en mesón."
+
+def renderizar_escaner_qr_en_vivo():
+    """Inyecta lector QR continuo en navegador sin necesidad de tomar foto."""
+    html_scanner = """
+    <div id="qr-wrapper" style="font-family: sans-serif; text-align: center; padding: 8px;">
+        <div id="reader" style="width: 100%; max-width: 460px; margin: 0 auto; border-radius: 12px; overflow: hidden; border: 3px solid #0d6efd;"></div>
+        <div id="qr-status" style="margin-top: 10px; font-size: 16px; font-weight: bold; color: #0d6efd;">
+            📷 Iniciando cámara... Apunta el código QR frente al lente
+        </div>
+    </div>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script>
+        const html5QrCode = new Html5Qrcode("reader");
+        let yaDetectado = false;
+
+        function onScanSuccess(decodedText, decodedResult) {
+            if (yaDetectado) return;
+            yaDetectado = true;
+            document.getElementById("qr-status").innerText = "✅ ¡QR detectado! Procesando...";
+            document.getElementById("qr-status").style.color = "#198754";
+
+            html5QrCode.stop().then(() => {
+                // Escribir en el campo de texto de Streamlit y presionar el botón de validación
+                const parentDoc = window.parent.document;
+                const inputs = parentDoc.querySelectorAll('input[type="text"]');
+                let targetInput = null;
+                inputs.forEach(inp => {
+                    if (inp.placeholder && inp.placeholder.includes("DOMEYKO-QR")) {
+                        targetInput = inp;
+                    }
+                });
+
+                if (targetInput) {
+                    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    nativeInputValueSetter.call(targetInput, decodedText);
+                    targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+                    setTimeout(() => {
+                        const buttons = parentDoc.querySelectorAll('button');
+                        buttons.forEach(btn => {
+                            if (btn.innerText && btn.innerText.includes("VALIDAR CÓDIGO QR")) {
+                                btn.click();
+                            }
+                        });
+                    }, 200);
+                }
+            }).catch(err => console.error(err));
+        }
+
+        html5QrCode.start(
+            { facingMode: "environment" },
+            { fps: 12, qrbox: { width: 250, height: 250 } },
+            onScanSuccess,
+            (errorMessage) => {}
+        ).catch(err => {
+            document.getElementById("qr-status").innerText = "⚠️ No se pudo acceder a la cámara. Revisa los permisos del navegador.";
+            document.getElementById("qr-status").style.color = "#dc3545";
+        });
+
+        window.addEventListener("beforeunload", () => {
+            if (html5QrCode.isScanning) {
+                html5QrCode.stop().catch(() => {});
+            }
+        });
+    </script>
+    """
+    components.html(html_scanner, height=390)
 
 @st.dialog("📩 ¡Solicitud Enviada a Caja!")
 def mostrar_popup_confirmacion(pedido: dict):
@@ -443,22 +502,22 @@ if st.session_state.personal_autenticado:
         st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
         st.session_state.franja_elegida = None
         st.session_state.pago_elegido = None
+        st.session_state.escaner_abierto = False
         config_op["productos_agotados"] = {prod: False for prod in MENU.keys()}
         st.toast("✅ Pedidos y encuestas eliminados, stock restaurado y cupos reiniciados.")
         st.rerun()
 
     if st.sidebar.button("Cerrar sesión", use_container_width=True):
         st.session_state.personal_autenticado = False
+        st.session_state.escaner_abierto = False
         st.rerun()
 
 # ==========================================
 # VISTA 1: ESTUDIANTE
 # ==========================================
 if modo == "📱 Estudiante (Realizar Pedido)":
-    # Estilos personalizados para input de nombre más grande y tarjetas interactivas
     st.markdown("""
         <style>
-        /* Agrandar el cuadro de texto para el nombre del estudiante */
         div[data-testid="stTextInput"] input {
             font-size: 19px !important;
             min-height: 54px !important;
@@ -567,7 +626,6 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             if st.button("🔄 Cupos", key="btn_refresh_cupos", use_container_width=True):
                 st.rerun()
 
-        # Validar que la franja actualmente elegida siga abierta y con cupos
         franja_actual = st.session_state.franja_elegida
         if franja_actual:
             libres_actual = max(0, LIMIT_PER_SLOT - contar_cupos_ocupados_franja(franja_actual))
@@ -575,7 +633,6 @@ if modo == "📱 Estudiante (Realizar Pedido)":
                 st.session_state.franja_elegida = None
                 franja_actual = None
 
-        # Si no hay ninguna seleccionada aún, preseleccionar automáticamente la primera disponible
         if franja_actual is None:
             for s in TIME_SLOTS:
                 if not franja_esta_cerrada_por_hora(s) and (LIMIT_PER_SLOT - contar_cupos_ocupados_franja(s)) > 0:
@@ -652,7 +709,6 @@ if modo == "📱 Estudiante (Realizar Pedido)":
     else:
         metodos_pago = ["Débito / Crédito", "Efectivo en Caja", "BAES / JUNAEB"]
 
-    # Sincronizar selección de pago con los métodos válidos
     if not metodos_pago:
         st.session_state.pago_elegido = None
     elif st.session_state.pago_elegido not in metodos_pago:
@@ -743,7 +799,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             st.session_state.pedido_popup = nuevo_pedido
             st.rerun()
 
-    # 5) Seguimiento en vivo abajo (justo después de enviar/pagar el pedido)
+    # 5) Seguimiento en vivo abajo
     intervalo_seguimiento = REFRESH_SEGUIMIENTO_ESTUDIANTE if st.session_state.mis_pedidos else None
 
     @st.fragment(run_every=intervalo_seguimiento)
@@ -929,7 +985,7 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
     # Estilos de alta visibilidad y botones extra grandes para personal de cocina
     st.markdown("""
         <style>
-        /* Botones principales (Entregar - Verde alto contraste) */
+        /* Botones principales (Entregar / Abrir Escáner - Verde alto contraste) */
         div.stButton > button[kind="primary"] {
             background-color: #198754 !important;
             border: 3px solid #146c43 !important;
@@ -944,17 +1000,17 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
             background-color: #157347 !important;
         }
 
-        /* Botones secundarios en tarjetas de cocina (Marcar Listo - Naranja/Ámbar llamativo) */
-        div[data-testid="stVerticalBlockBorderWrapper"] div.stButton > button[kind="secondary"] {
+        /* Botones secundarios grandes (Marcar Listo / Cerrar Escáner) */
+        div.stButton > button[kind="secondary"] {
             background-color: #e67e22 !important;
             border: 3px solid #ca6f1e !important;
             color: #ffffff !important;
-            font-size: 21px !important;
+            font-size: 20px !important;
             font-weight: 800 !important;
-            min-height: 68px !important;
+            min-height: 64px !important;
             border-radius: 12px !important;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"] div.stButton > button[kind="secondary"]:hover {
+        div.stButton > button[kind="secondary"]:hover {
             background-color: #d35400 !important;
         }
 
@@ -1120,45 +1176,6 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
                             st.toast(f"✅ Pedido {order['id']} entregado.")
                             st.rerun()
 
-        # Herramientas secundarias colapsadas abajo para no distraer
-        st.markdown("---")
-        with st.expander("📷 Escáner QR de Llegada (Cámara / Lector Óptico)", expanded=False):
-            col_cam, col_man = st.columns([1.2, 1])
-            with col_cam:
-                foto_qr = st.camera_input("Escanea el QR del estudiante", key="cam_cocina_qr")
-                if foto_qr is not None:
-                    texto_qr = decodificar_qr_imagen(foto_qr)
-                    if texto_qr:
-                        tipo_res, msg_res = procesar_escaneo_qr_totem(texto_qr)
-                        if tipo_res == "success":
-                            st.success(msg_res)
-                        elif tipo_res == "warning":
-                            st.warning(msg_res)
-                        elif tipo_res == "info":
-                            st.info(msg_res)
-                        else:
-                            st.error(msg_res)
-                    else:
-                        st.warning("No se detectó un código QR claro. Acerca el teléfono e intenta de nuevo.")
-
-            with col_man:
-                token_manual = st.text_input(
-                    "Lectura por pistola USB:",
-                    placeholder="DOMEYKO-QR|ORD-1234|TX-XXXXXX",
-                    key="input_lector_cocina"
-                ).strip()
-                if st.button("Registrar Llegada QR", key="btn_validar_cocina"):
-                    if token_manual:
-                        tipo_res, msg_res = procesar_escaneo_qr_totem(token_manual)
-                        if tipo_res == "success":
-                            st.success(msg_res)
-                        elif tipo_res == "warning":
-                            st.warning(msg_res)
-                        elif tipo_res == "info":
-                            st.info(msg_res)
-                        else:
-                            st.error(msg_res)
-
         with st.expander(f"📁 Ver Pedidos Ya Entregados Hoy ({len(historial_cerrados)})", expanded=False):
             if not historial_cerrados:
                 st.info("Aún no hay pedidos entregados hoy.")
@@ -1167,6 +1184,62 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
                     st.write(f"✔️ **{order['id']} — {order['cliente']}** | {order['detalle_productos']} | Estado: **{order['estado']}** ({order['hora_entrega']})")
 
     panel_cocina_vivo()
+
+    # =========================================================
+    # ESCÁNER QR BAJO DEMANDA (CÁMARA APAGADA HASTA PULSAR BOTÓN)
+    # =========================================================
+    st.markdown("---")
+    st.markdown("## 📷 Punto de Escaneo QR (Llegada de Estudiantes)")
+
+    if not st.session_state.escaner_abierto:
+        if st.button(
+            "📷 ABRIR ESCÁNER QR",
+            key="btn_abrir_escaner",
+            type="primary",
+            use_container_width=True
+        ):
+            st.session_state.escaner_abierto = True
+            st.rerun()
+    else:
+        if st.button(
+            "❌ CERRAR CÁMARA ESCÁNER",
+            key="btn_cerrar_escaner",
+            type="secondary",
+            use_container_width=True
+        ):
+            st.session_state.escaner_abierto = False
+            st.rerun()
+
+        with st.container(border=True):
+            col_cam, col_man = st.columns([1.3, 1])
+            with col_cam:
+                renderizar_escaner_qr_en_vivo()
+
+            with col_man:
+                st.markdown("#### Lector Óptico / Ingreso Manual:")
+                token_manual = st.text_input(
+                    "Código leído:",
+                    placeholder="DOMEYKO-QR|ORD-1234|TX-XXXXXX",
+                    key="input_lector_cocina"
+                ).strip()
+                if st.button(
+                    "✅ VALIDAR CÓDIGO QR",
+                    key="btn_validar_cocina",
+                    type="primary",
+                    use_container_width=True
+                ):
+                    if token_manual:
+                        tipo_res, msg_res = procesar_escaneo_qr_totem(token_manual)
+                        if tipo_res == "success":
+                            st.session_state.escaner_abierto = False
+                            st.toast(msg_res)
+                            st.rerun()
+                        elif tipo_res == "warning":
+                            st.warning(msg_res)
+                        elif tipo_res == "info":
+                            st.info(msg_res)
+                        else:
+                            st.error(msg_res)
 
 # ==========================================
 # VISTA 4: MÉTRICAS Y EXPORTACIÓN
