@@ -231,7 +231,7 @@ def obtener_imagen_producto(prod: str) -> str:
 
 @st.cache_data
 def generar_qr_image(data_text: str):
-    qr = qrcode.QRCode(version=1, box_size=8, border=2)
+    qr = qrcode.QRCode(version=1, box_size=12, border=3)
     qr.add_data(data_text)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
@@ -355,6 +355,86 @@ def mostrar_tarjeta_seguimiento(pedido: dict, permitir_acciones: bool = False):
     if estado == "Listo" and pedido["id"] not in st.session_state.pedidos_notificados_listos:
         st.session_state.pedidos_notificados_listos.add(pedido["id"])
         st.toast(f"🔔 ¡{pedido['cliente']}, tu pedido {pedido['id']} está LISTO! Escanea tu QR al llegar.", icon="✅")
+
+    with st.container(border=True):
+        col_info, col_qr = st.columns([2, 1.3])
+        with col_info:
+            st.markdown(f"#### 🧾 Pedido `{pedido['id']}` — {pedido['cliente']}")
+            st.write(f"**Detalle:** {pedido['detalle_productos']} ({pedido.get('cantidad_total', 1)} cupo/s)")
+            st.write(f"**Franja de retiro:** {pedido['franja']} | **Pago:** {pedido['pago']} ({formato_clp(pedido['precio'])})")
+            st.progress(progreso_map.get(estado, 0))
+
+            if estado == "Pendiente aprobación":
+                st.info("🕒 Paso 1: **Esperando aprobación en Caja** (Sin cobro aún mientras se verifica stock)")
+                if permitir_acciones:
+                    if st.button(
+                        "🗑️ Cancelar Solicitud (libera cupos)",
+                        key=f"cancel_user_{pedido['id']}",
+                        help="Puedes anular tu solicitud antes de pagar."
+                    ):
+                        actualizar_estado_pedido(pedido, "Descartado", motivo_descarte="Cancelado por usuario")
+                        st.toast(f"Solicitud {pedido['id']} cancelada. Cupos liberados.")
+                        st.rerun()
+
+            elif estado == "Aprobado - Pendiente de Pago":
+                if pedido["pago"] == "Efectivo en Caja":
+                    st.warning("💵 **¡Stock aprobado!** Acércate a Caja a pagar en efectivo para que tu pedido pase a Cocina.")
+                else:
+                    st.warning(f"💳 **¡Stock aprobado por Caja!** Completa tu pago con **{pedido['pago']}** para enviar el pedido a Cocina.")
+                    if permitir_acciones:
+                        c_pay, c_can = st.columns([2, 1])
+                        with c_pay:
+                            if st.button(
+                                f"💳 Pagar {formato_clp(pedido['precio'])} Ahora ({pedido['pago']})",
+                                key=f"pagar_user_{pedido['id']}",
+                                type="primary",
+                                use_container_width=True
+                            ):
+                                exito, tx_id = procesar_pago(pedido["pago"], pedido["precio"])
+                                if exito:
+                                    pedido["tx_id"] = tx_id
+                                    actualizar_estado_pedido(pedido, "En preparación")
+                                    st.toast(f"✅ Pago confirmado ({tx_id}). Pedido enviado a Cocina.")
+                                    st.rerun()
+                        with c_can:
+                            if st.button(
+                                "🗑️ Cancelar",
+                                key=f"cancel_unpaid_{pedido['id']}",
+                                use_container_width=True
+                            ):
+                                actualizar_estado_pedido(pedido, "Descartado", motivo_descarte="Cancelado por usuario")
+                                st.rerun()
+
+            elif estado == "En preparación":
+                st.info(f"👨‍🍳 **Pagado (`{pedido['tx_id']}`) y En Preparación** — Cocina ya está armando tu pedido.")
+
+            elif estado == "Listo":
+                st.success("🔔 **¡TU PEDIDO ESTÁ LISTO!** Acércate al punto de retiro y escanea tu QR para avisar a cocina.")
+                if permitir_acciones:
+                    if st.button(
+                        "📲 Escanear QR en Punto de Retiro (Avisar a Cocina)",
+                        key=f"checkin_user_{pedido['id']}",
+                        type="primary"
+                    ):
+                        actualizar_estado_pedido(pedido, "Cliente en mesón")
+                        st.toast("📣 Cocina notificada. Ya van a entregarte tu pedido.")
+                        st.rerun()
+
+            elif estado == "Cliente en mesón":
+                st.success("📣 **¡Cocina notificada!** Espera en el mesón, el personal ya va a entregarte tu pedido.")
+
+            elif estado == "Entregado":
+                st.write(f"✔️ Estado: **Entregado** (Retirado a las {pedido['hora_entrega']} | TX: `{pedido['tx_id']}`)")
+
+            elif estado == "Descartado":
+                st.error(f"❌ Estado: **Cancelado / Sin Stock** ({pedido.get('hora_entrega', 'Descartado')})")
+
+        with col_qr:
+            if pedido["tx_id"] != "PENDIENTE" and estado != "Descartado":
+                qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
+                st.image(qr_bytes, caption=f"QR Retiro {pedido['id']}", width=230)
+            else:
+                st.caption("🔒 El QR de retiro se activará una vez aprobado y pagado el pedido.")
 
     with st.container(border=True):
         col_info, col_qr = st.columns([3, 1])
