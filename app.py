@@ -45,9 +45,9 @@ REFRESH_OPERACION = 5
 MENU = {
     "Almuerzo Completo": {
         "precio": 2650,
-        "baes": True,
+        "baes": False,
         "solo_baes": False,
-        "desc": "Plato de fondo, ensalada, pan y postre del día.",
+        "desc": "Plato de fondo, ensalada, pan y postre del día (No apto para pago BAES).",
         "img_local": "almuerzo.jpg",
         "img_fallback": "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&h=300&fit=crop"
     },
@@ -71,7 +71,7 @@ MENU = {
         "precio": 1800,
         "baes": True,
         "solo_baes": False,
-        "desc": "Sándwich preparado fresco del día.",
+        "desc": "Sándwich preparado fresco del día (Apto para pago BAES).",
         "img_local": "sandwich.jpg",
         "img_fallback": "https://images.unsplash.com/photo-1528735602780-2552fd46c7af?w=400&h=300&fit=crop"
     }
@@ -766,15 +766,23 @@ if modo == "📱 Estudiante (Realizar Pedido)":
         "BAES / JUNAEB": "Tarjeta Junaeb"
     }
 
+    productos_no_baes_sel = [p for p in seleccionados if not MENU[p]["baes"]]
+
     if tiene_solo_baes and tiene_no_baes:
-        st.error("⚠️ No puedes mezclar 'Menú BAES' con 'Colación' en el mismo pedido porque tienen medios de pago incompatibles.")
+        st.error(
+            f"⚠️ No puedes mezclar 'Menú BAES' con **{', '.join(productos_no_baes_sel)}** en el mismo pedido "
+            "porque tienen medios de pago incompatibles."
+        )
         metodos_pago = []
     elif tiene_solo_baes:
         metodos_pago = ["BAES / JUNAEB"]
         st.info("🎓 Tu carrito incluye 'Menú BAES', por lo que el pago es exclusivo con tarjeta BAES / JUNAEB.")
     elif tiene_no_baes:
         metodos_pago = ["Débito / Crédito", "Efectivo en Caja"]
-        st.warning("⚠️ Nota: El producto 'Colación' no admite pago con tarjeta BAES / JUNAEB.")
+        st.warning(
+            f"⚠️ Nota: **{', '.join(productos_no_baes_sel)}** no admite pago con tarjeta BAES / JUNAEB "
+            "(solo Menú BAES y Sándwich aceptan BAES)."
+        )
     else:
         metodos_pago = ["Débito / Crédito", "Efectivo en Caja", "BAES / JUNAEB"]
 
