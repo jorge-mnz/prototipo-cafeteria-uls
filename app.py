@@ -6,6 +6,7 @@ import pandas as pd
 import io
 import os
 import time
+import tempfile
 import qrcode
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -76,6 +77,134 @@ MENU = {
     }
 }
 
+# ==========================================
+# COMPONENTE BIDIRECCIONAL NATIVO DE ESCÁNER QR
+# ==========================================
+@st.cache_resource
+def inicializar_componente_qr():
+    comp_dir = os.path.join(tempfile.gettempdir(), "domeyko_qr_reader_v2")
+    os.makedirs(comp_dir, exist_ok=True)
+    index_path = os.path.join(comp_dir, "index.html")
+
+    html_code = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      text-align: center;
+      background: transparent;
+    }
+    #reader {
+      width: 100%;
+      max-width: 440px;
+      margin: 0 auto;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 3px solid #0d6efd;
+    }
+    #qr-status {
+      margin-top: 10px;
+      font-size: 16px;
+      font-weight: 700;
+      color: #0d6efd;
+    }
+  </style>
+</head>
+<body>
+  <div id="reader"></div>
+  <div id="qr-status">📷 Iniciando cámara... Apunta el código QR frente al lente</div>
+
+  <script>
+    let streamlitListo = false;
+
+    function sendMessageToStreamlitClient(type, data) {
+      const outData = Object.assign({
+        isStreamlitMessage: true,
+        type: type,
+      }, data);
+      window.parent.postMessage(outData, "*");
+    }
+
+    function setComponentValue(value) {
+      sendMessageToStreamlitClient("streamlit:setComponentValue", {
+        value: value,
+        dataType: "json"
+      });
+    }
+
+    function setFrameHeight(height) {
+      sendMessageToStreamlitClient("streamlit:setFrameHeight", { height: height });
+    }
+
+    window.addEventListener("message", function(event) {
+      if (event.data && event.data.type === "streamlit:render") {
+        streamlitListo = true;
+        setFrameHeight(390);
+      }
+    });
+
+    // Asegurar handshake con Streamlit antes de permitir lectura
+    const readyInterval = setInterval(() => {
+      if (streamlitListo) {
+        clearInterval(readyInterval);
+      } else {
+        sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+        setFrameHeight(390);
+      }
+    }, 200);
+
+    sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+    setFrameHeight(390);
+
+    const html5QrCode = new Html5Qrcode("reader");
+    let yaDetectado = false;
+
+    function onScanSuccess(decodedText) {
+      if (yaDetectado) return;
+      yaDetectado = true;
+      const statusEl = document.getElementById("qr-status");
+      statusEl.innerText = "✅ ¡QR leído! Actualizando pantalla...";
+      statusEl.style.color = "#198754";
+
+      // Enviar valor inmediatamente a Python
+      setComponentValue(decodedText);
+
+      // Detener cámara en segundo plano sin bloquear el envío
+      html5QrCode.stop().catch(() => {});
+    }
+
+    html5QrCode.start(
+      { facingMode: "environment" },
+      { fps: 12, qrbox: { width: 240, height: 240 } },
+      onScanSuccess,
+      () => {}
+    ).catch(() => {
+      const statusEl = document.getElementById("qr-status");
+      statusEl.innerText = "⚠️ No se pudo acceder a la cámara. Revisa los permisos del navegador.";
+      statusEl.style.color = "#dc3545";
+    });
+
+    window.addEventListener("beforeunload", () => {
+      if (html5QrCode.isScanning) {
+        html5QrCode.stop().catch(() => {});
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+    with open(index_path, "w", encoding="utf-8") as f:
+        f.write(html_code)
+
+    return components.declare_component("domeyko_qr_scanner_v2", path=comp_dir)
+
+escaner_qr_nativo = inicializar_componente_qr()
+
 if COLOR_FONDO_APP:
     st.markdown(
         f"""
@@ -143,6 +272,9 @@ if "pago_elegido" not in st.session_state:
 
 if "escaner_abierto" not in st.session_state:
     st.session_state.escaner_abierto = False
+
+if "scanner_session_id" not in st.session_state:
+    st.session_state.scanner_session_id = 0
 
 if "ultimo_resultado_qr" not in st.session_state:
     st.session_state.ultimo_resultado_qr = None
@@ -269,61 +401,6 @@ def procesar_escaneo_qr_totem(token: str):
     actualizar_estado_pedido(pedido_obj, "Cliente en mesón")
     return "success", f"📣 ¡Notificación enviada a cocina! **{pedido_obj['cliente']}** (Pedido **{oid_esc}**) está esperando retiro en mesón."
 
-# Procesar inmediatamente si llegó un QR escaneado vía query_params
-if "qr_scan" in st.query_params:
-    token_url = st.query_params["qr_scan"]
-    del st.query_params["qr_scan"]
-    tipo_qr, msg_qr = procesar_escaneo_qr_totem(token_url)
-    st.session_state.ultimo_resultado_qr = (tipo_qr, msg_qr)
-    if tipo_qr == "success":
-        st.session_state.escaner_abierto = False
-
-def renderizar_escaner_qr_en_vivo():
-    """Inyecta lector QR continuo en navegador y envía el token vía URL query param."""
-    html_scanner = """
-    <div id="qr-wrapper" style="font-family: sans-serif; text-align: center; padding: 8px;">
-        <div id="reader" style="width: 100%; max-width: 460px; margin: 0 auto; border-radius: 12px; overflow: hidden; border: 3px solid #0d6efd;"></div>
-        <div id="qr-status" style="margin-top: 10px; font-size: 16px; font-weight: bold; color: #0d6efd;">
-            📷 Iniciando cámara... Apunta el código QR frente al lente
-        </div>
-    </div>
-    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-    <script>
-        const html5QrCode = new Html5Qrcode("reader");
-        let yaDetectado = false;
-
-        function onScanSuccess(decodedText, decodedResult) {
-            if (yaDetectado) return;
-            yaDetectado = true;
-            document.getElementById("qr-status").innerText = "✅ ¡QR detectado! Avisando a cocina...";
-            document.getElementById("qr-status").style.color = "#198754";
-
-            html5QrCode.stop().catch(() => {}).finally(() => {
-                const parentUrl = new URL(window.parent.location.href);
-                parentUrl.searchParams.set("qr_scan", decodedText);
-                window.parent.location.href = parentUrl.toString();
-            });
-        }
-
-        html5QrCode.start(
-            { facingMode: "environment" },
-            { fps: 12, qrbox: { width: 250, height: 250 } },
-            onScanSuccess,
-            (errorMessage) => {}
-        ).catch(err => {
-            document.getElementById("qr-status").innerText = "⚠️ No se pudo acceder a la cámara. Revisa los permisos del navegador.";
-            document.getElementById("qr-status").style.color = "#dc3545";
-        });
-
-        window.addEventListener("beforeunload", () => {
-            if (html5QrCode.isScanning) {
-                html5QrCode.stop().catch(() => {});
-            }
-        });
-    </script>
-    """
-    components.html(html_scanner, height=390)
-
 @st.dialog("📩 ¡Solicitud Enviada a Caja!")
 def mostrar_popup_confirmacion(pedido: dict):
     st.info(f"Hola **{pedido['cliente']}**, tu reserva de cupos ingresó a **Caja** para verificar stock.")
@@ -436,86 +513,6 @@ def mostrar_tarjeta_seguimiento(pedido: dict, permitir_acciones: bool = False):
             else:
                 st.caption("🔒 El QR de retiro se activará una vez aprobado y pagado el pedido.")
 
-    with st.container(border=True):
-        col_info, col_qr = st.columns([3, 1])
-        with col_info:
-            st.markdown(f"#### 🧾 Pedido `{pedido['id']}` — {pedido['cliente']}")
-            st.write(f"**Detalle:** {pedido['detalle_productos']} ({pedido.get('cantidad_total', 1)} cupo/s)")
-            st.write(f"**Franja de retiro:** {pedido['franja']} | **Pago:** {pedido['pago']} ({formato_clp(pedido['precio'])})")
-            st.progress(progreso_map.get(estado, 0))
-
-            if estado == "Pendiente aprobación":
-                st.info("🕒 Paso 1: **Esperando aprobación en Caja** (Sin cobro aún mientras se verifica stock)")
-                if permitir_acciones:
-                    if st.button(
-                        "🗑️ Cancelar Solicitud (libera cupos)",
-                        key=f"cancel_user_{pedido['id']}",
-                        help="Puedes anular tu solicitud antes de pagar."
-                    ):
-                        actualizar_estado_pedido(pedido, "Descartado", motivo_descarte="Cancelado por usuario")
-                        st.toast(f"Solicitud {pedido['id']} cancelada. Cupos liberados.")
-                        st.rerun()
-
-            elif estado == "Aprobado - Pendiente de Pago":
-                if pedido["pago"] == "Efectivo en Caja":
-                    st.warning("💵 **¡Stock aprobado!** Acércate a Caja a pagar en efectivo para que tu pedido pase a Cocina.")
-                else:
-                    st.warning(f"💳 **¡Stock aprobado por Caja!** Completa tu pago con **{pedido['pago']}** para enviar el pedido a Cocina.")
-                    if permitir_acciones:
-                        c_pay, c_can = st.columns([2, 1])
-                        with c_pay:
-                            if st.button(
-                                f"💳 Pagar {formato_clp(pedido['precio'])} Ahora ({pedido['pago']})",
-                                key=f"pagar_user_{pedido['id']}",
-                                type="primary",
-                                use_container_width=True
-                            ):
-                                exito, tx_id = procesar_pago(pedido["pago"], pedido["precio"])
-                                if exito:
-                                    pedido["tx_id"] = tx_id
-                                    actualizar_estado_pedido(pedido, "En preparación")
-                                    st.toast(f"✅ Pago confirmado ({tx_id}). Pedido enviado a Cocina.")
-                                    st.rerun()
-                        with c_can:
-                            if st.button(
-                                "🗑️ Cancelar",
-                                key=f"cancel_unpaid_{pedido['id']}",
-                                use_container_width=True
-                            ):
-                                actualizar_estado_pedido(pedido, "Descartado", motivo_descarte="Cancelado por usuario")
-                                st.rerun()
-
-            elif estado == "En preparación":
-                st.info(f"👨‍🍳 **Pagado (`{pedido['tx_id']}`) y En Preparación** — Cocina ya está armando tu pedido.")
-
-            elif estado == "Listo":
-                st.success("🔔 **¡TU PEDIDO ESTÁ LISTO!** Acércate al punto de retiro y escanea tu QR para avisar a cocina.")
-                if permitir_acciones:
-                    if st.button(
-                        "📲 Escanear QR en Punto de Retiro (Avisar a Cocina)",
-                        key=f"checkin_user_{pedido['id']}",
-                        type="primary"
-                    ):
-                        actualizar_estado_pedido(pedido, "Cliente en mesón")
-                        st.toast("📣 Cocina notificada. Ya van a entregarte tu pedido.")
-                        st.rerun()
-
-            elif estado == "Cliente en mesón":
-                st.success("📣 **¡Cocina notificada!** Espera en el mesón, el personal ya va a entregarte tu pedido.")
-
-            elif estado == "Entregado":
-                st.write(f"✔️ Estado: **Entregado** (Retirado a las {pedido['hora_entrega']} | TX: `{pedido['tx_id']}`)")
-
-            elif estado == "Descartado":
-                st.error(f"❌ Estado: **Cancelado / Sin Stock** ({pedido.get('hora_entrega', 'Descartado')})")
-
-        with col_qr:
-            if pedido["tx_id"] != "PENDIENTE" and estado != "Descartado":
-                qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
-                st.image(qr_bytes, caption=f"QR Retiro {pedido['id']}", width=120)
-            else:
-                st.caption("🔒 El QR de retiro se activará una vez aprobado y pagado el pedido.")
-
 def verificar_login_personal() -> bool:
     if st.session_state.personal_autenticado:
         return True
@@ -543,15 +540,12 @@ if MODO_PRUEBAS:
     st.sidebar.warning("🧪 ENTORNO DE PRUEBAS")
 
 st.sidebar.title("📌 Menú de Navegación")
-
-opciones_vista = [
+modo = st.sidebar.radio("Selecciona la vista:", [
     "📱 Estudiante (Realizar Pedido)",
     "💵 Caja (Aprobación y Stock)",
     "🍳 Cocina (Preparación y Entrega)",
     "📊 Panel de Métricas / Exportación"
-]
-idx_default = 2 if st.session_state.ultimo_resultado_qr is not None else 0
-modo = st.sidebar.radio("Selecciona la vista:", opciones_vista, index=idx_default)
+])
 
 if st.session_state.personal_autenticado:
     st.sidebar.markdown("---")
@@ -1287,6 +1281,7 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
             use_container_width=True
         ):
             st.session_state.escaner_abierto = True
+            st.session_state.scanner_session_id += 1
             st.rerun()
     else:
         if st.button(
@@ -1301,7 +1296,15 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
         with st.container(border=True):
             col_cam, col_man = st.columns([1.3, 1])
             with col_cam:
-                renderizar_escaner_qr_en_vivo()
+                qr_leido_camara = escaner_qr_nativo(
+                    key=f"qr_cam_v2_{st.session_state.scanner_session_id}",
+                    default=None
+                )
+                if qr_leido_camara:
+                    tipo_res, msg_res = procesar_escaneo_qr_totem(qr_leido_camara)
+                    st.session_state.ultimo_resultado_qr = (tipo_res, msg_res)
+                    st.session_state.escaner_abierto = False
+                    st.rerun()
 
             with col_man:
                 st.markdown("#### Lector Óptico / Ingreso Manual:")
