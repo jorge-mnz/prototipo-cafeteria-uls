@@ -45,33 +45,19 @@ REFRESH_OPERACION = 5
 MENU = {
     "Almuerzo Completo": {
         "precio": 2650,
-        "baes": False,
-        "solo_baes": False,
-        "desc": "Plato de fondo, ensalada, pan y postre del día (No apto para pago BAES).",
+        "desc": "Plato de fondo, ensalada, pan y postre del día.",
         "img_local": "almuerzo.jpg",
         "img_fallback": "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&h=300&fit=crop"
     },
-    "Menú BAES": {
-        "precio": 2350,
-        "baes": True,
-        "solo_baes": True,
-        "desc": "Menú convenio exclusivo pago con tarjeta BAES / JUNAEB.",
-        "img_local": "baes.jpg",
-        "img_fallback": "https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=400&h=300&fit=crop"
-    },
     "Colación": {
         "precio": 2000,
-        "baes": False,
-        "solo_baes": False,
-        "desc": "Plato de fondo y pan (No apto para pago BAES).",
+        "desc": "Plato de fondo y pan.",
         "img_local": "colacion.jpg",
         "img_fallback": "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=400&h=300&fit=crop"
     },
     "Sándwich": {
         "precio": 1800,
-        "baes": True,
-        "solo_baes": False,
-        "desc": "Sándwich preparado fresco del día (Apto para pago BAES).",
+        "desc": "Sándwich preparado fresco del día.",
         "img_local": "sandwich.jpg",
         "img_fallback": "https://images.unsplash.com/photo-1528735602780-2552fd46c7af?w=400&h=300&fit=crop"
     }
@@ -148,7 +134,6 @@ def inicializar_componente_qr():
       }
     });
 
-    // Asegurar handshake con Streamlit antes de permitir lectura
     const readyInterval = setInterval(() => {
       if (streamlitListo) {
         clearInterval(readyInterval);
@@ -171,10 +156,7 @@ def inicializar_componente_qr():
       statusEl.innerText = "✅ ¡QR leído! Actualizando pantalla...";
       statusEl.style.color = "#198754";
 
-      // Enviar valor inmediatamente a Python
       setComponentValue(decodedText);
-
-      // Detener cámara en segundo plano sin bloquear el envío
       html5QrCode.stop().catch(() => {});
     }
 
@@ -268,7 +250,7 @@ if "franja_elegida" not in st.session_state:
     st.session_state.franja_elegida = None
 
 if "pago_elegido" not in st.session_state:
-    st.session_state.pago_elegido = None
+    st.session_state.pago_elegido = "Débito / Crédito"
 
 if "escaner_abierto" not in st.session_state:
     st.session_state.escaner_abierto = False
@@ -289,7 +271,7 @@ def formato_clp(valor: int) -> str:
     return f"${valor:,}".replace(",", ".")
 
 def procesar_pago(metodo: str, monto: int):
-    if metodo in ["Débito / Crédito", "BAES / JUNAEB", "Efectivo en Caja"]:
+    if metodo == "Débito / Crédito":
         tx_id = "TX-" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
         return True, tx_id
     return False, "Método no válido"
@@ -454,33 +436,30 @@ def mostrar_tarjeta_seguimiento(pedido: dict, permitir_acciones: bool = False):
                         st.rerun()
 
             elif estado == "Aprobado - Pendiente de Pago":
-                if pedido["pago"] == "Efectivo en Caja":
-                    st.warning("💵 **¡Stock aprobado!** Acércate a Caja a pagar en efectivo para que tu pedido pase a Cocina.")
-                else:
-                    st.warning(f"💳 **¡Stock aprobado por Caja!** Completa tu pago con **{pedido['pago']}** para enviar el pedido a Cocina.")
-                    if permitir_acciones:
-                        c_pay, c_can = st.columns([2, 1])
-                        with c_pay:
-                            if st.button(
-                                f"💳 Pagar {formato_clp(pedido['precio'])} Ahora ({pedido['pago']})",
-                                key=f"pagar_user_{pedido['id']}",
-                                type="primary",
-                                use_container_width=True
-                            ):
-                                exito, tx_id = procesar_pago(pedido["pago"], pedido["precio"])
-                                if exito:
-                                    pedido["tx_id"] = tx_id
-                                    actualizar_estado_pedido(pedido, "En preparación")
-                                    st.toast(f"✅ Pago confirmado ({tx_id}). Pedido enviado a Cocina.")
-                                    st.rerun()
-                        with c_can:
-                            if st.button(
-                                "🗑️ Cancelar",
-                                key=f"cancel_unpaid_{pedido['id']}",
-                                use_container_width=True
-                            ):
-                                actualizar_estado_pedido(pedido, "Descartado", motivo_descarte="Cancelado por usuario")
+                st.warning(f"💳 **¡Stock aprobado por Caja!** Completa tu pago con **{pedido['pago']}** para enviar el pedido a Cocina.")
+                if permitir_acciones:
+                    c_pay, c_can = st.columns([2, 1])
+                    with c_pay:
+                        if st.button(
+                            f"💳 Pagar {formato_clp(pedido['precio'])} Ahora ({pedido['pago']})",
+                            key=f"pagar_user_{pedido['id']}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            exito, tx_id = procesar_pago(pedido["pago"], pedido["precio"])
+                            if exito:
+                                pedido["tx_id"] = tx_id
+                                actualizar_estado_pedido(pedido, "En preparación")
+                                st.toast(f"✅ Pago confirmado ({tx_id}). Pedido enviado a Cocina.")
                                 st.rerun()
+                    with c_can:
+                        if st.button(
+                            "🗑️ Cancelar",
+                            key=f"cancel_unpaid_{pedido['id']}",
+                            use_container_width=True
+                        ):
+                            actualizar_estado_pedido(pedido, "Descartado", motivo_descarte="Cancelado por usuario")
+                            st.rerun()
 
             elif estado == "En preparación":
                 st.info(f"👨‍🍳 **Pagado (`{pedido['tx_id']}`) y En Preparación** — Cocina ya está armando tu pedido.")
@@ -569,7 +548,7 @@ if st.session_state.personal_autenticado:
         st.session_state.pedidos_notificados_listos.clear()
         st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
         st.session_state.franja_elegida = None
-        st.session_state.pago_elegido = None
+        st.session_state.pago_elegido = "Débito / Crédito"
         st.session_state.escaner_abierto = False
         st.session_state.ultimo_resultado_qr = None
         config_op["productos_agotados"] = {prod: False for prod in MENU.keys()}
@@ -621,7 +600,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
     st.markdown("### 🛍️ 1. Arma tu Pedido")
     
     for prod, esta_agotado in config_op["productos_agotados"].items():
-        if esta_agotado and st.session_state.carrito[prod] > 0:
+        if esta_agotado and st.session_state.carrito.get(prod, 0) > 0:
             st.session_state.carrito[prod] = 0
 
     total_items_carrito = sum(st.session_state.carrito.values())
@@ -634,7 +613,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             if i + j < len(productos_lista):
                 prod = productos_lista[i + j]
                 info = MENU[prod]
-                cant_actual = st.session_state.carrito[prod]
+                cant_actual = st.session_state.carrito.get(prod, 0)
                 agotado = config_op["productos_agotados"].get(prod, False)
 
                 with cols_cards[j]:
@@ -749,68 +728,14 @@ if modo == "📱 Estudiante (Realizar Pedido)":
 
     selector_franja_botones()
 
-    # 4) Selector de Medio de Pago mediante BOTONES INTERACTIVOS
-    st.markdown("### 💳 4. Toca tu Medio de Pago")
+    # 4) Medio de Pago (Exclusivo Débito / Crédito)
+    st.markdown("### 💳 4. Medio de Pago")
     seleccionados = [prod for prod, cant in st.session_state.carrito.items() if cant > 0]
-    tiene_no_baes = any(not MENU[p]["baes"] for p in seleccionados)
-    tiene_solo_baes = any(MENU[p]["solo_baes"] for p in seleccionados)
+    st.session_state.pago_elegido = "Débito / Crédito"
 
-    iconos_pago = {
-        "Débito / Crédito": "💳",
-        "Efectivo en Caja": "💵",
-        "BAES / JUNAEB": "🎓"
-    }
-    desc_pago = {
-        "Débito / Crédito": "Tarjeta bancaria",
-        "Efectivo en Caja": "Pagar en mesón",
-        "BAES / JUNAEB": "Tarjeta Junaeb"
-    }
-
-    productos_no_baes_sel = [p for p in seleccionados if not MENU[p]["baes"]]
-
-    if tiene_solo_baes and tiene_no_baes:
-        st.error(
-            f"⚠️ No puedes mezclar 'Menú BAES' con **{', '.join(productos_no_baes_sel)}** en el mismo pedido "
-            "porque tienen medios de pago incompatibles."
-        )
-        metodos_pago = []
-    elif tiene_solo_baes:
-        metodos_pago = ["BAES / JUNAEB"]
-        st.info("🎓 Tu carrito incluye 'Menú BAES', por lo que el pago es exclusivo con tarjeta BAES / JUNAEB.")
-    elif tiene_no_baes:
-        metodos_pago = ["Débito / Crédito", "Efectivo en Caja"]
-        st.warning(
-            f"⚠️ Nota: **{', '.join(productos_no_baes_sel)}** no admite pago con tarjeta BAES / JUNAEB "
-            "(solo Menú BAES y Sándwich aceptan BAES)."
-        )
-    else:
-        metodos_pago = ["Débito / Crédito", "Efectivo en Caja", "BAES / JUNAEB"]
-
-    if not metodos_pago:
-        st.session_state.pago_elegido = None
-    elif st.session_state.pago_elegido not in metodos_pago:
-        st.session_state.pago_elegido = metodos_pago[0]
-
-    if metodos_pago:
-        cols_pago = st.columns(len(metodos_pago))
-        for idx_p, metodo in enumerate(metodos_pago):
-            es_pago_sel = (st.session_state.pago_elegido == metodo)
-            with cols_pago[idx_p]:
-                with st.container(border=True):
-                    icono = iconos_pago.get(metodo, "💳")
-                    if es_pago_sel:
-                        st.markdown(f":green[**✅ {icono} {metodo}**]")
-                    else:
-                        st.markdown(f"**{icono} {metodo}**")
-                    st.caption(desc_pago.get(metodo, ""))
-                    if st.button(
-                        "Seleccionado" if es_pago_sel else "Elegir medio",
-                        key=f"btn_pago_{metodo}",
-                        type="primary" if es_pago_sel else "secondary",
-                        use_container_width=True
-                    ):
-                        st.session_state.pago_elegido = metodo
-                        st.rerun()
+    with st.container(border=True):
+        st.markdown(":green[**✅ 💳 Débito / Crédito**]")
+        st.caption("Pago digital con tarjeta bancaria una vez confirmado el stock en Caja.")
 
     st.markdown("---")
     ahora_ts = time.time()
@@ -830,7 +755,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
     if st.button(
         "📩 Enviar Solicitud a Caja (Sin cobro aún)",
         type="primary",
-        disabled=(total_items_carrito == 0 or not metodos_pago or not franja_sel or en_cooldown),
+        disabled=(total_items_carrito == 0 or not franja_sel or en_cooldown),
         use_container_width=True
     ):
         cupos_libres_reales = LIMIT_PER_SLOT - contar_cupos_ocupados_franja(franja_sel)
@@ -937,7 +862,7 @@ elif modo == "💵 Caja (Aprobación y Stock)":
         st.stop()
 
     st.title("💵 Panel de Caja — Validación de Stock y Cobro")
-    st.caption("1) Aprueba la disponibilidad de stock. 2) Una vez pagado (digital o en efectivo), el pedido pasa automáticamente a Cocina.")
+    st.caption("1) Aprueba la disponibilidad de stock. 2) Una vez pagado con Débito / Crédito, el pedido pasa automáticamente a Cocina.")
 
     # Control de stock disponible
     with st.expander("🛑 Control de Stock del Día (Activar / Detener Ventas)", expanded=True):
@@ -992,7 +917,7 @@ elif modo == "💵 Caja (Aprobación y Stock)":
                         with col_inf:
                             st.markdown(f"#### 🧾 `{order['id']}` — 👤 **{order['cliente']}** | ⏰ Franja: `{order['franja']}`")
                             st.write(f"**Pedido:** {order['detalle_productos']} ({order.get('cantidad_total', 1)} cupo/s)")
-                            st.caption(f"Solicitud: {order['hora_registro']} | Medio elegido: **{order['pago']}** | Total: **{formato_clp(order['precio'])}**")
+                            st.caption(f"Solicitud: {order['hora_registro']} | Medio: **{order['pago']}** | Total: **{formato_clp(order['precio'])}**")
                         with col_acc:
                             if st.button(
                                 "✅ Aprobar Stock",
@@ -1023,14 +948,10 @@ elif modo == "💵 Caja (Aprobación y Stock)":
                         with c_p1:
                             st.markdown(f"#### 💳 `{order['id']}` — 👤 **{order['cliente']}** | ⏰ Franja: `{order['franja']}`")
                             st.write(f"**Detalle:** {order['detalle_productos']} | Total: **{formato_clp(order['precio'])}** ({order['pago']})")
-                            if order["pago"] == "Efectivo en Caja":
-                                st.caption("💵 Esperando que el estudiante se acerque a pagar en efectivo en Caja.")
-                            else:
-                                st.caption("📱 Esperando que el estudiante confirme el pago digital desde su celular.")
+                            st.caption("📱 Esperando que el estudiante confirme el pago digital desde su celular.")
                         with c_p2:
-                            etiqueta_cobro = "💵 Registrar Pago Efectivo" if order["pago"] == "Efectivo en Caja" else "✅ Confirmar Pago Manual"
                             if st.button(
-                                etiqueta_cobro,
+                                "✅ Confirmar Pago Manual",
                                 key=f"caja_cobrar_{order['id']}",
                                 type="primary",
                                 use_container_width=True
@@ -1059,10 +980,8 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
     if not verificar_login_personal():
         st.stop()
 
-    # Estilos de alta visibilidad y botones extra grandes para personal de cocina
     st.markdown("""
         <style>
-        /* Botones principales (Entregar / Abrir Escáner - Verde alto contraste) */
         div.stButton > button[kind="primary"] {
             background-color: #198754 !important;
             border: 3px solid #146c43 !important;
@@ -1077,7 +996,6 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
             background-color: #157347 !important;
         }
 
-        /* Botones secundarios grandes (Marcar Listo / Cerrar Escáner) */
         div.stButton > button[kind="secondary"] {
             background-color: #e67e22 !important;
             border: 3px solid #ca6f1e !important;
@@ -1091,7 +1009,6 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
             background-color: #d35400 !important;
         }
 
-        /* Textos más grandes y claros en tarjetas de pedidos */
         .cocina-titulo-pedido {
             font-size: 26px;
             font-weight: 800;
@@ -1119,7 +1036,6 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
     st.markdown("# 🍳 Pantalla de Cocina")
     st.markdown("#### Instrucciones rápidas: **1)** Prepara el pedido y toca **🔔 MARCAR LISTO**. **2)** Cuando llegue el estudiante, toca **🤝 ENTREGAR PEDIDO**.")
 
-    # Mostrar alerta si se acaba de escanear un QR
     if st.session_state.ultimo_resultado_qr is not None:
         tipo_res, msg_res = st.session_state.ultimo_resultado_qr
         st.session_state.ultimo_resultado_qr = None
@@ -1139,7 +1055,6 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
         listos_sin_llegar = [o for o in db_orders if o["estado"] == "Listo"]
         historial_cerrados = [o for o in db_orders if o["estado"] in ["Entregado", "Descartado"]]
 
-        # Indicadores grandes y directos arriba
         c1, c2, c3, c_ref = st.columns([1.6, 1.6, 1.6, 1])
         with c1:
             st.metric("🚨 ESPERANDO EN MESÓN", len(clientes_esperando))
@@ -1154,9 +1069,6 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
 
         st.markdown("---")
 
-        # =========================================================
-        # BLOQUE 1: CLIENTES QUE YA LLEGARON A RETIRAR (PRIORIDAD)
-        # =========================================================
         if clientes_esperando:
             st.error(f"🚨 ¡ATENCIÓN! Hay **{len(clientes_esperando)} persona(s)** esperando en el mesón para retirar:")
             for order in clientes_esperando:
@@ -1189,9 +1101,6 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
                             st.rerun()
             st.markdown("---")
 
-        # =========================================================
-        # BLOQUE 2: PEDIDOS POR PREPARAR (ORDENADOS POR FRANJA)
-        # =========================================================
         st.markdown("## 👨‍🍳 1. Pedidos por Preparar")
         if not en_preparacion:
             st.success("✅ No hay pedidos pendientes de preparación en este momento.")
@@ -1230,9 +1139,6 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
 
         st.markdown("---")
 
-        # =========================================================
-        # BLOQUE 3: PEDIDOS YA LISTOS ESPERANDO QUE LLEGUE EL ALUMNO
-        # =========================================================
         st.markdown("## 🔔 2. Pedidos Listos (Esperando al Estudiante)")
         if not listos_sin_llegar:
             st.info("No hay pedidos listos esperando retiro.")
@@ -1275,9 +1181,6 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
 
     panel_cocina_vivo()
 
-    # =========================================================
-    # ESCÁNER QR BAJO DEMANDA (CÁMARA APAGADA HASTA PULSAR BOTÓN)
-    # =========================================================
     st.markdown("---")
     st.markdown("## 📷 Punto de Escaneo QR (Llegada de Estudiantes)")
 
