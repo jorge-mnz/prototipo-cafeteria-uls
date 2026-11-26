@@ -103,7 +103,7 @@ def inicializar_componente_qr():
 </head>
 <body>
   <div id="reader"></div>
-  <div id="qr-status">📷 Iniciando cámara... Apunta el código QR frente al lente</div>
+  <div id="qr-status">📷 Iniciando cámara... Apunta el código QR para confirmar retiro</div>
 
   <script>
     let streamlitListo = false;
@@ -153,7 +153,7 @@ def inicializar_componente_qr():
       if (yaDetectado) return;
       yaDetectado = true;
       const statusEl = document.getElementById("qr-status");
-      statusEl.innerText = "✅ ¡QR leído! Actualizando pantalla...";
+      statusEl.innerText = "✅ ¡QR leído! Confirmando entrega...";
       statusEl.style.color = "#198754";
 
       setComponentValue(decodedText);
@@ -355,7 +355,7 @@ def generar_qr_image(data_text: str):
     return buf.getvalue()
 
 def procesar_escaneo_qr_totem(token: str):
-    """Notifica a cocina que el cliente llegó al punto de escaneo con su QR."""
+    """Confirma la entrega del pedido al escanear el QR en el punto de retiro."""
     if not token.startswith("DOMEYKO-QR|"):
         return "error", "❌ Formato de QR no reconocido por Domeyko GO."
     
@@ -373,15 +373,14 @@ def procesar_escaneo_qr_totem(token: str):
         return "warning", f"💳 El pedido **{oid_esc}** ({pedido_obj['cliente']}) aún no ha completado su aprobación/pago en Caja."
     if pedido_obj["estado"] == "En preparación":
         return "warning", f"👨‍🍳 El pedido **{oid_esc}** ({pedido_obj['cliente']}) todavía se está preparando en cocina."
-    if pedido_obj["estado"] == "Cliente en mesón":
-        return "info", f"📣 Cocina ya fue notificada para el pedido **{oid_esc}** de **{pedido_obj['cliente']}**."
     if pedido_obj["estado"] == "Entregado":
-        return "warning", f"⚠️ El pedido **{oid_esc}** ya fue entregado a las {pedido_obj['hora_entrega']}."
+        return "info", f"✔️ El pedido **{oid_esc}** ({pedido_obj['cliente']}) ya fue entregado a las {pedido_obj['hora_entrega']}."
     if pedido_obj["estado"] == "Descartado":
         return "error", f"❌ El pedido **{oid_esc}** fue cancelado/rechazado."
 
-    actualizar_estado_pedido(pedido_obj, "Cliente en mesón")
-    return "success", f"📣 ¡Notificación enviada a cocina! **{pedido_obj['cliente']}** (Pedido **{oid_esc}**) está esperando retiro en mesón."
+    # Si está en "Listo" o "Cliente en mesón", el escaneo QR confirma directamente la entrega
+    actualizar_estado_pedido(pedido_obj, "Entregado")
+    return "success", f"✅ ¡Entrega confirmada por QR! Pedido **{oid_esc}** entregado a **{pedido_obj['cliente']}** ({pedido_obj['detalle_productos']})."
 
 @st.dialog("📩 ¡Solicitud Enviada a Caja!")
 def mostrar_popup_confirmacion(pedido: dict):
@@ -413,7 +412,7 @@ def mostrar_tarjeta_seguimiento(pedido: dict, permitir_acciones: bool = False):
 
     if estado == "Listo" and pedido["id"] not in st.session_state.pedidos_notificados_listos:
         st.session_state.pedidos_notificados_listos.add(pedido["id"])
-        st.toast(f"🔔 ¡{pedido['cliente']}, tu pedido {pedido['id']} está LISTO! Escanea tu QR al llegar.", icon="✅")
+        st.toast(f"🔔 ¡{pedido['cliente']}, tu pedido {pedido['id']} está LISTO! Avisa cuando llegues al mesón.", icon="✅")
 
     with st.container(border=True):
         col_info, col_qr = st.columns([2, 1.3])
@@ -465,19 +464,20 @@ def mostrar_tarjeta_seguimiento(pedido: dict, permitir_acciones: bool = False):
                 st.info(f"👨‍🍳 **Pagado (`{pedido['tx_id']}`) y En Preparación** — Cocina ya está armando tu pedido.")
 
             elif estado == "Listo":
-                st.success("🔔 **¡TU PEDIDO ESTÁ LISTO!** Acércate al punto de retiro y escanea tu QR para avisar a cocina.")
+                st.success("🔔 **¡TU PEDIDO ESTÁ LISTO!** Acércate al mesón y presiona el botón para avisar a cocina.")
                 if permitir_acciones:
                     if st.button(
-                        "📲 Escanear QR en Punto de Retiro (Avisar a Cocina)",
+                        "🙋 Ya llegué al mesón (Avisar a Cocina)",
                         key=f"checkin_user_{pedido['id']}",
-                        type="primary"
+                        type="primary",
+                        use_container_width=True
                     ):
                         actualizar_estado_pedido(pedido, "Cliente en mesón")
                         st.toast("📣 Cocina notificada. Ya van a entregarte tu pedido.")
                         st.rerun()
 
             elif estado == "Cliente en mesón":
-                st.success("📣 **¡Cocina notificada!** Espera en el mesón, el personal ya va a entregarte tu pedido.")
+                st.success("📣 **¡Cocina notificada!** Espera en el mesón; puedes mostrar tu QR para confirmar el retiro o esperar al personal.")
 
             elif estado == "Entregado":
                 st.write(f"✔️ Estado: **Entregado** (Retirado a las {pedido['hora_entrega']} | TX: `{pedido['tx_id']}`)")
@@ -488,9 +488,9 @@ def mostrar_tarjeta_seguimiento(pedido: dict, permitir_acciones: bool = False):
         with col_qr:
             if pedido["tx_id"] != "PENDIENTE" and estado != "Descartado":
                 qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
-                st.image(qr_bytes, caption=f"QR Retiro {pedido['id']}", width=230)
+                st.image(qr_bytes, caption=f"QR Confirmación Retiro {pedido['id']}", width=230)
             else:
-                st.caption("🔒 El QR de retiro se activará una vez aprobado y pagado el pedido.")
+                st.caption("🔒 El QR de confirmación se activará una vez aprobado y pagado el pedido.")
 
 def verificar_login_personal() -> bool:
     if st.session_state.personal_autenticado:
@@ -1034,7 +1034,7 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
     """, unsafe_allow_html=True)
 
     st.markdown("# 🍳 Pantalla de Cocina")
-    st.markdown("#### Instrucciones rápidas: **1)** Prepara el pedido y toca **🔔 MARCAR LISTO**. **2)** Cuando llegue el estudiante, toca **🤝 ENTREGAR PEDIDO**.")
+    st.markdown("#### Instrucciones rápidas: **1)** Prepara el pedido y toca **🔔 MARCAR LISTO**. **2)** Cuando el estudiante avise que llegó al mesón, confirma la entrega escaneando su **QR** o tocando **🤝 ENTREGAR PEDIDO**.")
 
     if st.session_state.ultimo_resultado_qr is not None:
         tipo_res, msg_res = st.session_state.ultimo_resultado_qr
@@ -1069,8 +1069,11 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
 
         st.markdown("---")
 
+        # =========================================================
+        # BLOQUE 1: CLIENTES QUE AVISARON QUE LLEGARON AL MESÓN
+        # =========================================================
         if clientes_esperando:
-            st.error(f"🚨 ¡ATENCIÓN! Hay **{len(clientes_esperando)} persona(s)** esperando en el mesón para retirar:")
+            st.error(f"🚨 ¡ATENCIÓN! Hay **{len(clientes_esperando)} persona(s)** esperando en el mesón para retirar (escanea su QR o confirma abajo):")
             for order in clientes_esperando:
                 with st.container(border=True):
                     col_alerta, col_ent = st.columns([2.6, 1.4])
@@ -1085,7 +1088,7 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
                             unsafe_allow_html=True
                         )
                         st.markdown(
-                            f"<div class='cocina-subdato'>⏰ Franja: {order['franja']} | Llegó al mesón: {order.get('hora_llegada_cliente', '-')}</div>",
+                            f"<div class='cocina-subdato'>⏰ Franja: {order['franja']} | Avisó llegada: {order.get('hora_llegada_cliente', '-')}</div>",
                             unsafe_allow_html=True
                         )
                     with col_ent:
@@ -1101,6 +1104,9 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
                             st.rerun()
             st.markdown("---")
 
+        # =========================================================
+        # BLOQUE 2: PEDIDOS POR PREPARAR
+        # =========================================================
         st.markdown("## 👨‍🍳 1. Pedidos por Preparar")
         if not en_preparacion:
             st.success("✅ No hay pedidos pendientes de preparación en este momento.")
@@ -1139,6 +1145,9 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
 
         st.markdown("---")
 
+        # =========================================================
+        # BLOQUE 3: PEDIDOS YA LISTOS ESPERANDO AVISO DEL ALUMNO
+        # =========================================================
         st.markdown("## 🔔 2. Pedidos Listos (Esperando al Estudiante)")
         if not listos_sin_llegar:
             st.info("No hay pedidos listos esperando retiro.")
@@ -1181,12 +1190,16 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
 
     panel_cocina_vivo()
 
+    # =========================================================
+    # ESCÁNER QR OPCIONAL PARA CONFIRMAR RETIRO
+    # =========================================================
     st.markdown("---")
-    st.markdown("## 📷 Punto de Escaneo QR (Llegada de Estudiantes)")
+    st.markdown("## 📷 Confirmar Entrega con QR (Opcional)")
+    st.caption("Si el estudiante muestra su QR al retirar, escanéalo aquí para marcar el pedido como Entregado automáticamente (también puedes usar los botones verdes de arriba).")
 
     if not st.session_state.escaner_abierto:
         if st.button(
-            "📷 ABRIR ESCÁNER QR",
+            "📷 ABRIR ESCÁNER QR (CONFIRMAR ENTREGA)",
             key="btn_abrir_escaner",
             type="primary",
             use_container_width=True
@@ -1225,7 +1238,7 @@ elif modo == "🍳 Cocina (Preparación y Entrega)":
                     key="input_lector_cocina"
                 ).strip()
                 if st.button(
-                    "✅ VALIDAR CÓDIGO QR",
+                    "✅ CONFIRMAR ENTREGA POR QR",
                     key="btn_validar_cocina",
                     type="primary",
                     use_container_width=True
@@ -1245,7 +1258,7 @@ else:
         st.stop()
 
     st.title("📊 Análisis de Datos y Trazabilidad del Prototipo")
-    st.markdown("Registro cuantitativo de órdenes por etapa (Solicitud → Aprobación → Pago → Cocina → QR → Entrega) y encuestas piloto.")
+    st.markdown("Registro cuantitativo de órdenes por etapa (Solicitud → Aprobación → Pago → Cocina → Llegada → Entrega) y encuestas piloto.")
 
     st.subheader("1. Tiempos de Operación por Pedido")
     if not db_orders:
