@@ -1,13 +1,13 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import random
 import string
 import pandas as pd
 import io
 import os
 import time
+import tempfile
 import qrcode
-import cv2
-import numpy as np
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -21,7 +21,10 @@ st.set_page_config(page_title="Domeyko GO - Casino ULS", page_icon="🍔", layou
 # False -> Versión Oficial: oculta el interruptor y exige siempre pedir antes del inicio de la franja.
 MODO_PRUEBAS = False
 
-CLAVE_PERSONAL = "domeyko2026"  # Contraseña para acceder al KDS y Métricas
+# Color de fondo opcional (deja None para usar el tema por defecto de Streamlit)
+COLOR_FONDO_APP = None
+
+CLAVE_PERSONAL = "domeyko2026"  # Contraseña para Caja, Cocina y Métricas
 LIMIT_PER_SLOT = 10             # Máximo 10 unidades/cupos por franja de 15 min
 MAX_ITEMS_CARRITO = 3           # Máximo 3 productos por pedido
 COOLDOWN_SEGUNDOS = 60          # Límite de 1 pedido por minuto por dispositivo
@@ -35,39 +38,25 @@ TIME_SLOTS = [
 ]
 
 # Tasas de refresco optimizadas para conectividad universitaria (en segundos)
-REFRESH_SEGUIMIENTO_ESTUDIANTE = 10
+REFRESH_SEGUIMIENTO_ESTUDIANTE = 8
 REFRESH_CUPOS_ESTUDIANTE = 15
-REFRESH_KDS_OPERADOR = 6
+REFRESH_OPERACION = 5
 
 MENU = {
     "Almuerzo Completo": {
         "precio": 2650,
-        "baes": True,
-        "solo_baes": False,
         "desc": "Plato de fondo, ensalada, pan y postre del día.",
         "img_local": "almuerzo.jpg",
         "img_fallback": "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&h=300&fit=crop"
     },
-    "Menú BAES": {
-        "precio": 2350,
-        "baes": True,
-        "solo_baes": True,
-        "desc": "Menú convenio exclusivo pago con tarjeta BAES / JUNAEB.",
-        "img_local": "baes.jpg",
-        "img_fallback": "https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=400&h=300&fit=crop"
-    },
     "Colación": {
         "precio": 2000,
-        "baes": False,
-        "solo_baes": False,
-        "desc": "Plato de fondo y pan (No apto para pago BAES).",
+        "desc": "Plato de fondo y pan.",
         "img_local": "colacion.jpg",
         "img_fallback": "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=400&h=300&fit=crop"
     },
     "Sándwich": {
         "precio": 1800,
-        "baes": True,
-        "solo_baes": False,
         "desc": "Sándwich preparado fresco del día.",
         "img_local": "sandwich.jpg",
         "img_fallback": "https://images.unsplash.com/photo-1528735602780-2552fd46c7af?w=400&h=300&fit=crop"
@@ -75,10 +64,150 @@ MENU = {
 }
 
 # ==========================================
+# COMPONENTE BIDIRECCIONAL NATIVO DE ESCÁNER QR
+# ==========================================
+@st.cache_resource
+def inicializar_componente_qr():
+    comp_dir = os.path.join(tempfile.gettempdir(), "domeyko_qr_reader_v2")
+    os.makedirs(comp_dir, exist_ok=True)
+    index_path = os.path.join(comp_dir, "index.html")
+
+    html_code = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      text-align: center;
+      background: transparent;
+    }
+    #reader {
+      width: 100%;
+      max-width: 440px;
+      margin: 0 auto;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 3px solid #0d6efd;
+    }
+    #qr-status {
+      margin-top: 10px;
+      font-size: 16px;
+      font-weight: 700;
+      color: #0d6efd;
+    }
+  </style>
+</head>
+<body>
+  <div id="reader"></div>
+  <div id="qr-status">📷 Iniciando cámara... Apunta el código QR para confirmar retiro</div>
+
+  <script>
+    let streamlitListo = false;
+
+    function sendMessageToStreamlitClient(type, data) {
+      const outData = Object.assign({
+        isStreamlitMessage: true,
+        type: type,
+      }, data);
+      window.parent.postMessage(outData, "*");
+    }
+
+    function setComponentValue(value) {
+      sendMessageToStreamlitClient("streamlit:setComponentValue", {
+        value: value,
+        dataType: "json"
+      });
+    }
+
+    function setFrameHeight(height) {
+      sendMessageToStreamlitClient("streamlit:setFrameHeight", { height: height });
+    }
+
+    window.addEventListener("message", function(event) {
+      if (event.data && event.data.type === "streamlit:render") {
+        streamlitListo = true;
+        setFrameHeight(390);
+      }
+    });
+
+    const readyInterval = setInterval(() => {
+      if (streamlitListo) {
+        clearInterval(readyInterval);
+      } else {
+        sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+        setFrameHeight(390);
+      }
+    }, 200);
+
+    sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+    setFrameHeight(390);
+
+    const html5QrCode = new Html5Qrcode("reader");
+    let yaDetectado = false;
+
+    function onScanSuccess(decodedText) {
+      if (yaDetectado) return;
+      yaDetectado = true;
+      const statusEl = document.getElementById("qr-status");
+      statusEl.innerText = "✅ ¡QR leído! Confirmando entrega...";
+      statusEl.style.color = "#198754";
+
+      setComponentValue(decodedText);
+      html5QrCode.stop().catch(() => {});
+    }
+
+    html5QrCode.start(
+      { facingMode: "environment" },
+      { fps: 12, qrbox: { width: 240, height: 240 } },
+      onScanSuccess,
+      () => {}
+    ).catch(() => {
+      const statusEl = document.getElementById("qr-status");
+      statusEl.innerText = "⚠️ No se pudo acceder a la cámara. Revisa los permisos del navegador.";
+      statusEl.style.color = "#dc3545";
+    });
+
+    window.addEventListener("beforeunload", () => {
+      if (html5QrCode.isScanning) {
+        html5QrCode.stop().catch(() => {});
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+    with open(index_path, "w", encoding="utf-8") as f:
+        f.write(html_code)
+
+    return components.declare_component("domeyko_qr_scanner_v2", path=comp_dir)
+
+escaner_qr_nativo = inicializar_componente_qr()
+
+if COLOR_FONDO_APP:
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-color: {COLOR_FONDO_APP};
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+# ==========================================
 # ESTADO COMPARTIDO EN SERVIDOR
 # ==========================================
 @st.cache_resource
 def obtener_base_datos():
+    return []
+
+@st.cache_resource
+def obtener_base_encuestas():
     return []
 
 @st.cache_resource
@@ -89,15 +218,21 @@ def obtener_config_operativa():
     }
 
 db_orders = obtener_base_datos()
+db_surveys = obtener_base_encuestas()
 config_op = obtener_config_operativa()
 
-# En versión oficial, forzar siempre la validación horaria activa
 if not MODO_PRUEBAS:
     config_op["validar_horario"] = True
 
 # Estado local individual de cada celular/navegador
 if "mis_pedidos" not in st.session_state:
     st.session_state.mis_pedidos = []
+
+if "pedidos_notificados_aprobados" not in st.session_state:
+    st.session_state.pedidos_notificados_aprobados = set()
+
+if "pedidos_notificados_listos" not in st.session_state:
+    st.session_state.pedidos_notificados_listos = set()
 
 if "personal_autenticado" not in st.session_state:
     st.session_state.personal_autenticado = False
@@ -111,6 +246,21 @@ if "pedido_popup" not in st.session_state:
 if "carrito" not in st.session_state:
     st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
 
+if "franja_elegida" not in st.session_state:
+    st.session_state.franja_elegida = None
+
+if "pago_elegido" not in st.session_state:
+    st.session_state.pago_elegido = "Débito / Crédito"
+
+if "escaner_abierto" not in st.session_state:
+    st.session_state.escaner_abierto = False
+
+if "scanner_session_id" not in st.session_state:
+    st.session_state.scanner_session_id = 0
+
+if "ultimo_resultado_qr" not in st.session_state:
+    st.session_state.ultimo_resultado_qr = None
+
 # ==========================================
 # FUNCIONES AUXILIARES
 # ==========================================
@@ -121,7 +271,7 @@ def formato_clp(valor: int) -> str:
     return f"${valor:,}".replace(",", ".")
 
 def procesar_pago(metodo: str, monto: int):
-    if metodo in ["Débito / Crédito", "BAES / JUNAEB", "Efectivo en Caja"]:
+    if metodo == "Débito / Crédito":
         tx_id = "TX-" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
         return True, tx_id
     return False, "Método no válido"
@@ -137,14 +287,55 @@ def contar_cupos_ocupados_franja(franja: str) -> int:
     )
 
 def franja_esta_cerrada_por_hora(franja: str) -> bool:
-    """Retorna True si la validación está activa y la hora actual >= hora de inicio de la franja."""
     if not config_op.get("validar_horario", True):
         return False
-    hora_inicio_str = franja.split("-")[0].strip()  # ej. "13:00"
+    hora_inicio_str = franja.split("-")[0].strip()
     h_ini, m_ini = map(int, hora_inicio_str.split(":"))
     ahora = ahora_chile()
     inicio_franja = ahora.replace(hour=h_ini, minute=m_ini, second=0, microsecond=0)
     return ahora >= inicio_franja
+
+def actualizar_estado_pedido(order: dict, nuevo_estado: str, motivo_descarte: str = "Descartado"):
+    """Registra la transición de estado y su marca de tiempo exacta."""
+    ahora_str = ahora_chile().strftime("%H:%M:%S")
+    order["estado"] = nuevo_estado
+
+    if nuevo_estado == "Aprobado - Pendiente de Pago":
+        if order.get("hora_aprobacion", "-") == "-":
+            order["hora_aprobacion"] = ahora_str
+    elif nuevo_estado == "En preparación":
+        if order.get("hora_aprobacion", "-") == "-":
+            order["hora_aprobacion"] = ahora_str
+        if order.get("hora_pago", "-") == "-":
+            order["hora_pago"] = ahora_str
+    elif nuevo_estado == "Listo":
+        if order.get("hora_listo", "-") == "-":
+            order["hora_listo"] = ahora_str
+    elif nuevo_estado == "Cliente en mesón":
+        if order.get("hora_listo", "-") == "-":
+            order["hora_listo"] = ahora_str
+        if order.get("hora_llegada_cliente", "-") == "-":
+            order["hora_llegada_cliente"] = ahora_str
+    elif nuevo_estado == "Entregado":
+        if order.get("hora_listo", "-") == "-":
+            order["hora_listo"] = ahora_str
+        if order.get("hora_llegada_cliente", "-") == "-":
+            order["hora_llegada_cliente"] = ahora_str
+        order["hora_entrega"] = ahora_str
+    elif nuevo_estado == "Descartado":
+        order["hora_entrega"] = motivo_descarte
+
+def calcular_minutos_diferencia(h_inicio: str, h_fin: str):
+    invalidos = {"-", "Descartado", "Rechazado en caja", "Cancelado por usuario", None, ""}
+    if h_inicio in invalidos or h_fin in invalidos:
+        return None
+    try:
+        t1 = datetime.strptime(h_inicio, "%H:%M:%S")
+        t2 = datetime.strptime(h_fin, "%H:%M:%S")
+        diff = (t2 - t1).total_seconds() / 60.0
+        return round(max(0.0, diff), 2)
+    except ValueError:
+        return None
 
 def obtener_imagen_producto(prod: str) -> str:
     ruta_local = MENU[prod]["img_local"]
@@ -154,7 +345,7 @@ def obtener_imagen_producto(prod: str) -> str:
 
 @st.cache_data
 def generar_qr_image(data_text: str):
-    qr = qrcode.QRCode(version=1, box_size=8, border=2)
+    qr = qrcode.QRCode(version=1, box_size=12, border=3)
     qr.add_data(data_text)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
@@ -163,16 +354,8 @@ def generar_qr_image(data_text: str):
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-def decodificar_qr_imagen(uploaded_img) -> str:
-    file_bytes = np.asarray(bytearray(uploaded_img.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if img is None:
-        return ""
-    detector = cv2.QRCodeDetector()
-    data, _, _ = detector.detectAndDecode(img)
-    return data.strip() if data else ""
-
-def validar_y_entregar_token_qr(token: str):
+def procesar_escaneo_qr_totem(token: str):
+    """Confirma la entrega del pedido al escanear el QR en el punto de retiro."""
     if not token.startswith("DOMEYKO-QR|"):
         return "error", "❌ Formato de QR no reconocido por Domeyko GO."
     
@@ -185,69 +368,136 @@ def validar_y_entregar_token_qr(token: str):
     )
 
     if not pedido_obj:
-        return "error", "❌ Código QR no corresponde a ninguna orden registrada en el sistema."
+        return "error", "❌ Código QR no corresponde a una orden pagada y válida."
+    if pedido_obj["estado"] in ["Pendiente aprobación", "Aprobado - Pendiente de Pago"]:
+        return "warning", f"💳 El pedido **{oid_esc}** ({pedido_obj['cliente']}) aún no ha completado su aprobación/pago en Caja."
+    if pedido_obj["estado"] == "En preparación":
+        return "warning", f"👨‍🍳 El pedido **{oid_esc}** ({pedido_obj['cliente']}) todavía se está preparando en cocina."
     if pedido_obj["estado"] == "Entregado":
-        return "warning", f"⚠️ El pedido **{oid_esc}** ({pedido_obj['cliente']}) ya fue entregado a las {pedido_obj['hora_entrega']}."
+        return "info", f"✔️ El pedido **{oid_esc}** ({pedido_obj['cliente']}) ya fue entregado a las {pedido_obj['hora_entrega']}."
     if pedido_obj["estado"] == "Descartado":
-        return "error", f"❌ El pedido **{oid_esc}** fue descartado y no es válido para retiro."
+        return "error", f"❌ El pedido **{oid_esc}** fue cancelado/rechazado."
 
-    pedido_obj["estado"] = "Entregado"
-    pedido_obj["hora_entrega"] = ahora_chile().strftime("%H:%M:%S")
-    return "success", f"✅ QR válido: Pedido **{oid_esc}** de **{pedido_obj['cliente']}** ({pedido_obj['detalle_productos']}) marcado como ENTREGADO."
+    # Si está en "Listo" o "Cliente en mesón", el escaneo QR confirma directamente la entrega
+    actualizar_estado_pedido(pedido_obj, "Entregado")
+    return "success", f"✅ ¡Entrega confirmada por QR! Pedido **{oid_esc}** entregado a **{pedido_obj['cliente']}** ({pedido_obj['detalle_productos']})."
 
-@st.dialog("🎉 ¡Pedido Confirmado Exitosamente!")
+@st.dialog("📩 ¡Solicitud Enviada a Caja!")
 def mostrar_popup_confirmacion(pedido: dict):
-    st.success(f"Gracias **{pedido['cliente']}**, tu orden ya ingresó a cocina.")
-    col_txt, col_qr = st.columns([2, 1])
-    with col_txt:
-        st.markdown(f"### Código: `{pedido['id']}`")
-        st.write(f"**Franja de retiro:** {pedido['franja']}")
-        st.write(f"**Detalle:** {pedido['detalle_productos']}")
-        st.write(f"**Total pagado:** {formato_clp(pedido['precio'])} ({pedido['pago']})")
-        st.info("Muestra este QR en el mesón de entrega al retirar tu pedido.")
-    with col_qr:
-        qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
-        st.image(qr_bytes, caption=pedido["id"], width=130)
+    st.info(f"Hola **{pedido['cliente']}**, tu reserva de cupos ingresó a **Caja** para verificar stock.")
+    st.markdown(f"### Código de Solicitud: `{pedido['id']}`")
+    st.write(f"**Franja reservada:** {pedido['franja']}")
+    st.write(f"**Detalle:** {pedido['detalle_productos']}")
+    st.write(f"**Monto a pagar tras aprobación:** {formato_clp(pedido['precio'])} ({pedido['pago']})")
+    st.warning("⚠️ **Importante:** No se te cobrará nada hasta que Caja apruebe tu pedido. Revisa el seguimiento aquí abajo para completar el pago cuando sea aprobado.")
 
-    if st.button("Entendido, ver seguimiento", type="primary", use_container_width=True):
+    if st.button("Entendido, ir al seguimiento", type="primary", use_container_width=True):
         st.rerun()
 
-def mostrar_tarjeta_seguimiento(pedido: dict):
+def mostrar_tarjeta_seguimiento(pedido: dict, permitir_acciones: bool = False):
     progreso_map = {
-        "Recibido": 25,
-        "En preparación": 50,
+        "Pendiente aprobación": 15,
+        "Aprobado - Pendiente de Pago": 35,
+        "En preparación": 60,
         "Listo": 85,
+        "Cliente en mesón": 92,
         "Entregado": 100,
         "Descartado": 0
     }
     estado = pedido["estado"]
+
+    if estado == "Aprobado - Pendiente de Pago" and pedido["id"] not in st.session_state.pedidos_notificados_aprobados:
+        st.session_state.pedidos_notificados_aprobados.add(pedido["id"])
+        st.toast(f"✅ ¡Stock confirmado! Paga tu pedido {pedido['id']} para enviarlo a cocina.", icon="💳")
+
+    if estado == "Listo" and pedido["id"] not in st.session_state.pedidos_notificados_listos:
+        st.session_state.pedidos_notificados_listos.add(pedido["id"])
+        st.toast(f"🔔 ¡{pedido['cliente']}, tu pedido {pedido['id']} está LISTO! Avisa cuando llegues al mesón.", icon="✅")
+
     with st.container(border=True):
-        col_info, col_qr = st.columns([3, 1])
+        col_info, col_qr = st.columns([2, 1.3])
         with col_info:
             st.markdown(f"#### 🧾 Pedido `{pedido['id']}` — {pedido['cliente']}")
             st.write(f"**Detalle:** {pedido['detalle_productos']} ({pedido.get('cantidad_total', 1)} cupo/s)")
             st.write(f"**Franja de retiro:** {pedido['franja']} | **Pago:** {pedido['pago']} ({formato_clp(pedido['precio'])})")
             st.progress(progreso_map.get(estado, 0))
-            if estado == "Recibido":
-                st.info("🕒 Estado: **Recibido** (En cola de preparación)")
+
+            if estado == "Pendiente aprobación":
+                st.info("🕒 Paso 1: **Esperando aprobación en Caja** (Sin cobro aún mientras se verifica stock)")
+                if permitir_acciones:
+                    if st.button(
+                        "🗑️ Cancelar Solicitud (libera cupos)",
+                        key=f"cancel_user_{pedido['id']}",
+                        help="Puedes anular tu solicitud antes de pagar."
+                    ):
+                        actualizar_estado_pedido(pedido, "Descartado", motivo_descarte="Cancelado por usuario")
+                        st.toast(f"Solicitud {pedido['id']} cancelada. Cupos liberados.")
+                        st.rerun()
+
+            elif estado == "Aprobado - Pendiente de Pago":
+                st.warning(f"💳 **¡Stock aprobado por Caja!** Completa tu pago con **{pedido['pago']}** para enviar el pedido a Cocina.")
+                if permitir_acciones:
+                    c_pay, c_can = st.columns([2, 1])
+                    with c_pay:
+                        if st.button(
+                            f"💳 Pagar {formato_clp(pedido['precio'])} Ahora ({pedido['pago']})",
+                            key=f"pagar_user_{pedido['id']}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            exito, tx_id = procesar_pago(pedido["pago"], pedido["precio"])
+                            if exito:
+                                pedido["tx_id"] = tx_id
+                                actualizar_estado_pedido(pedido, "En preparación")
+                                st.toast(f"✅ Pago confirmado ({tx_id}). Pedido enviado a Cocina.")
+                                st.rerun()
+                    with c_can:
+                        if st.button(
+                            "🗑️ Cancelar",
+                            key=f"cancel_unpaid_{pedido['id']}",
+                            use_container_width=True
+                        ):
+                            actualizar_estado_pedido(pedido, "Descartado", motivo_descarte="Cancelado por usuario")
+                            st.rerun()
+
             elif estado == "En preparación":
-                st.warning("👨‍🍳 Estado: **En preparación** (Tu pedido se está armando)")
+                st.info(f"👨‍🍳 **Pagado (`{pedido['tx_id']}`) y En Preparación** — Cocina ya está armando tu pedido.")
+
             elif estado == "Listo":
-                st.success("✅ Estado: **¡LISTO PARA RETIRAR!** Acércate al mesón de entrega y muestra tu QR.")
+                st.success("🔔 **¡TU PEDIDO ESTÁ LISTO!** Acércate al mesón y presiona el botón para avisar a cocina.")
+                if permitir_acciones:
+                    if st.button(
+                        "🙋 Ya llegué al mesón (Avisar a Cocina)",
+                        key=f"checkin_user_{pedido['id']}",
+                        type="primary",
+                        use_container_width=True
+                    ):
+                        actualizar_estado_pedido(pedido, "Cliente en mesón")
+                        st.toast("📣 Cocina notificada. Ya van a entregarte tu pedido.")
+                        st.rerun()
+
+            elif estado == "Cliente en mesón":
+                st.success("📣 **¡Cocina notificada!** Espera en el mesón; puedes mostrar tu QR para confirmar el retiro o esperar al personal.")
+
             elif estado == "Entregado":
-                st.write(f"✔️ Estado: **Entregado** (Retirado a las {pedido['hora_entrega']})")
+                st.write(f"✔️ Estado: **Entregado** (Retirado a las {pedido['hora_entrega']} | TX: `{pedido['tx_id']}`)")
+
             elif estado == "Descartado":
-                st.error("❌ Estado: **Descartado / Cancelado** (Acércate al mesón de atención para más detalles)")
+                st.error(f"❌ Estado: **Cancelado / Sin Stock** ({pedido.get('hora_entrega', 'Descartado')})")
+
         with col_qr:
-            qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
-            st.image(qr_bytes, caption=pedido["id"], width=120)
+            if pedido["tx_id"] != "PENDIENTE" and estado != "Descartado":
+                qr_bytes = generar_qr_image(f"DOMEYKO-QR|{pedido['id']}|{pedido['tx_id']}")
+                st.image(qr_bytes, caption=f"QR Confirmación Retiro {pedido['id']}", width=230)
+            else:
+                st.caption("🔒 El QR de confirmación se activará una vez aprobado y pagado el pedido.")
 
 def verificar_login_personal() -> bool:
     if st.session_state.personal_autenticado:
         return True
 
     st.title("🔒 Acceso Restringido - Personal Cafetería")
-    st.markdown("Ingresa la clave operativa para gestionar pedidos y métricas.")
+    st.markdown("Ingresa la clave operativa para acceder a Caja, Cocina y Métricas.")
     with st.form("form_login_personal"):
         clave_ingresada = st.text_input("Contraseña:", type="password")
         submit = st.form_submit_button("Ingresar", type="primary")
@@ -270,8 +520,9 @@ if MODO_PRUEBAS:
 
 st.sidebar.title("📌 Menú de Navegación")
 modo = st.sidebar.radio("Selecciona la vista:", [
-    "📱 Estudiante (Realizar Pedido)", 
-    "🍳 Personal Cafetería (KDS)",
+    "📱 Estudiante (Realizar Pedido)",
+    "💵 Caja (Aprobación y Stock)",
+    "🍳 Cocina (Preparación y Entrega)",
     "📊 Panel de Métricas / Exportación"
 ])
 
@@ -279,7 +530,6 @@ if st.session_state.personal_autenticado:
     st.sidebar.markdown("---")
     st.sidebar.success("🔓 Sesión de personal activa")
 
-    # Control exclusivo de la versión de pruebas para activar/desactivar bloqueo horario
     if MODO_PRUEBAS:
         val_horaria = st.sidebar.toggle(
             "⏰ Bloquear franjas ya iniciadas",
@@ -292,20 +542,48 @@ if st.session_state.personal_autenticado:
     
     if st.sidebar.button("🗑️ Vaciar cupos y reiniciar", type="primary", use_container_width=True):
         db_orders.clear()
+        db_surveys.clear()
         st.session_state.mis_pedidos.clear()
+        st.session_state.pedidos_notificados_aprobados.clear()
+        st.session_state.pedidos_notificados_listos.clear()
         st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
+        st.session_state.franja_elegida = None
+        st.session_state.pago_elegido = "Débito / Crédito"
+        st.session_state.escaner_abierto = False
+        st.session_state.ultimo_resultado_qr = None
         config_op["productos_agotados"] = {prod: False for prod in MENU.keys()}
-        st.toast("✅ Pedidos eliminados, stock restaurado y cupos reiniciados.")
+        st.toast("✅ Pedidos y encuestas eliminados, stock restaurado y cupos reiniciados.")
         st.rerun()
 
     if st.sidebar.button("Cerrar sesión", use_container_width=True):
         st.session_state.personal_autenticado = False
+        st.session_state.escaner_abierto = False
         st.rerun()
 
 # ==========================================
 # VISTA 1: ESTUDIANTE
 # ==========================================
 if modo == "📱 Estudiante (Realizar Pedido)":
+    st.markdown("""
+        <style>
+        div[data-testid="stTextInput"] input {
+            font-size: 19px !important;
+            min-height: 54px !important;
+            padding: 12px 16px !important;
+            border-radius: 10px !important;
+            border: 2px solid #4a5568 !important;
+        }
+        div[data-testid="stTextInput"] input:focus {
+            border-color: #28a745 !important;
+            box-shadow: 0 0 0 2px rgba(40, 167, 69, 0.25) !important;
+        }
+        div[data-testid="stTextInput"] label p {
+            font-size: 17px !important;
+            font-weight: 700 !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     if st.session_state.pedido_popup is not None:
         pedido_recien_creado = st.session_state.pedido_popup
         st.session_state.pedido_popup = None
@@ -318,33 +596,11 @@ if modo == "📱 Estudiante (Realizar Pedido)":
 
     st.subheader("Sistema de Pedidos Anticipados por QR")
 
-    # 1) Seguimiento en vivo condicional
-    intervalo_seguimiento = REFRESH_SEGUIMIENTO_ESTUDIANTE if st.session_state.mis_pedidos else None
-
-    @st.fragment(run_every=intervalo_seguimiento)
-    def seccion_seguimiento_vivo():
-        if st.session_state.mis_pedidos:
-            col_titulo, col_btn = st.columns([4, 1])
-            with col_titulo:
-                st.markdown("### 📍 Seguimiento en Vivo de tu Pedido")
-            with col_btn:
-                if st.button("🔄 Actualizar", key="btn_refresh_est"):
-                    st.rerun()
-
-            for pid in reversed(st.session_state.mis_pedidos):
-                pedido_actual = next((o for o in db_orders if o["id"] == pid), None)
-                if pedido_actual:
-                    mostrar_tarjeta_seguimiento(pedido_actual)
-            st.markdown("---")
-
-    seccion_seguimiento_vivo()
-
-    # 2) Catálogo con tarjetas visuales estilo menú (2 columnas)
-    st.markdown("### 🛍️ Arma tu Pedido")
+    # 1) Catálogo con tarjetas visuales estilo menú (2 columnas)
+    st.markdown("### 🛍️ 1. Arma tu Pedido")
     
-    # Si un producto se agotó mientras estaba en el carrito, limpiar su cantidad automáticamente
     for prod, esta_agotado in config_op["productos_agotados"].items():
-        if esta_agotado and st.session_state.carrito[prod] > 0:
+        if esta_agotado and st.session_state.carrito.get(prod, 0) > 0:
             st.session_state.carrito[prod] = 0
 
     total_items_carrito = sum(st.session_state.carrito.values())
@@ -357,7 +613,7 @@ if modo == "📱 Estudiante (Realizar Pedido)":
             if i + j < len(productos_lista):
                 prod = productos_lista[i + j]
                 info = MENU[prod]
-                cant_actual = st.session_state.carrito[prod]
+                cant_actual = st.session_state.carrito.get(prod, 0)
                 agotado = config_op["productos_agotados"].get(prod, False)
 
                 with cols_cards[j]:
@@ -394,170 +650,223 @@ if modo == "📱 Estudiante (Realizar Pedido)":
         total_pagar = sum(MENU[prod]["precio"] * cant for prod, cant in st.session_state.carrito.items())
         with st.container(border=True):
             st.markdown(f"**🛒 Resumen del Carrito ({total_items_carrito}/{MAX_ITEMS_CARRITO} productos = {total_items_carrito} cupo/s):** " + " + ".join(resumen_items))
-            st.markdown(f"**Total a Pagar:** {formato_clp(total_pagar)}")
+            st.markdown(f"**Total Estimado:** {formato_clp(total_pagar)} *(se paga una vez que Caja confirme stock)*")
 
-    # 3) Datos del estudiante y franja horaria
-    st.markdown("### 📝 Datos de Retiro y Pago")
-    nombre_cliente = st.text_input("Tu Nombre y Apellido (para llamarte en el mesón):", placeholder="Ej. Camila Rojas")
+    # 2) Datos del estudiante (Campo grande)
+    st.markdown("### 📝 2. Identificación para Retiro")
+    nombre_cliente = st.text_input(
+        "👤 Tu Nombre y Apellido (para llamarte en el mesón):",
+        placeholder="Escribe aquí tu nombre y apellido (Ej. Camila Rojas)..."
+    )
+
+    # 3) Selector de Franja Horaria mediante TARJETAS INTERACTIVAS
+    st.markdown("### ⏰ 3. Toca la Franja Horaria de Retiro")
 
     @st.fragment(run_every=REFRESH_CUPOS_ESTUDIANTE)
-    def selector_franja_vivo():
+    def selector_franja_botones():
         col_f_titulo, col_f_btn = st.columns([4, 1])
         with col_f_titulo:
-            st.markdown("**Selecciona la Franja Horaria de Retiro**")
             if config_op.get("validar_horario", True):
-                st.caption(f"Hora actual: **{ahora_chile().strftime('%H:%M')}** — Solo puedes reservar franjas que aún no han comenzado.")
+                st.caption(f"Hora actual: **{ahora_chile().strftime('%H:%M')}** — Toca una tarjeta disponible para seleccionarla.")
+            else:
+                st.caption("Toca una tarjeta de horario para seleccionarla.")
         with col_f_btn:
-            if st.button("🔄 Cupos", key="btn_refresh_cupos"):
+            if st.button("🔄 Cupos", key="btn_refresh_cupos", use_container_width=True):
                 st.rerun()
-        
+
+        franja_actual = st.session_state.franja_elegida
+        if franja_actual:
+            libres_actual = max(0, LIMIT_PER_SLOT - contar_cupos_ocupados_franja(franja_actual))
+            if franja_esta_cerrada_por_hora(franja_actual) or libres_actual == 0:
+                st.session_state.franja_elegida = None
+                franja_actual = None
+
+        if franja_actual is None:
+            for s in TIME_SLOTS:
+                if not franja_esta_cerrada_por_hora(s) and (LIMIT_PER_SLOT - contar_cupos_ocupados_franja(s)) > 0:
+                    st.session_state.franja_elegida = s
+                    franja_actual = s
+                    break
+
         cols = st.columns(len(TIME_SLOTS))
         for idx, slot in enumerate(TIME_SLOTS):
             libres = max(0, LIMIT_PER_SLOT - contar_cupos_ocupados_franja(slot))
             cerrada_hora = franja_esta_cerrada_por_hora(slot)
+            sin_cupos = (libres == 0)
+            deshabilitada = cerrada_hora or sin_cupos
+            es_seleccionada = (st.session_state.franja_elegida == slot) and not deshabilitada
+
             with cols[idx]:
-                if cerrada_hora:
-                    st.metric(label=slot, value="CERRADA", delta="Fuera de hora", delta_color="off")
-                else:
-                    st.metric(
-                        label=slot,
-                        value=f"{libres} / {LIMIT_PER_SLOT}",
-                        delta="Disponible" if libres > 0 else "Agotado",
-                        delta_color="normal" if libres > 0 else "off"
-                    )
+                with st.container(border=True):
+                    if es_seleccionada:
+                        st.markdown(f":green[**✅ {slot}**]")
+                    else:
+                        st.markdown(f"**{slot}**")
 
-        def formatear_franja(slot):
-            if franja_esta_cerrada_por_hora(slot):
-                return f"{slot} (CERRADA - Ya inició el horario)"
-            libres = max(0, LIMIT_PER_SLOT - contar_cupos_ocupados_franja(slot))
-            if libres > 0:
-                return f"{slot} ({libres} cupos disponibles)"
-            return f"{slot} (AGOTADO)"
+                    if cerrada_hora:
+                        st.markdown("### CERRADA")
+                        st.caption("🔴 Fuera de hora")
+                        texto_boton = "Cerrada"
+                    elif sin_cupos:
+                        st.markdown("### 0 / 10")
+                        st.caption("🔴 Sin cupos")
+                        texto_boton = "Agotado"
+                    else:
+                        st.markdown(f"### {libres} / {LIMIT_PER_SLOT}")
+                        st.caption("🟢 Disponible")
+                        texto_boton = "Seleccionado" if es_seleccionada else "Elegir horario"
 
-        st.selectbox(
-            "Franjas de retiro disponibles:",
-            options=TIME_SLOTS,
-            format_func=formatear_franja,
-            key="franja_elegida"
-        )
+                    if st.button(
+                        texto_boton,
+                        key=f"btn_slot_{idx}",
+                        type="primary" if es_seleccionada else "secondary",
+                        disabled=deshabilitada,
+                        use_container_width=True
+                    ):
+                        st.session_state.franja_elegida = slot
+                        st.rerun()
 
-    selector_franja_vivo()
+    selector_franja_botones()
 
-    # Reglas dinámicas de medio de pago según el carrito
+    # 4) Medio de Pago (Exclusivo Débito / Crédito)
+    st.markdown("### 💳 4. Medio de Pago")
     seleccionados = [prod for prod, cant in st.session_state.carrito.items() if cant > 0]
-    tiene_no_baes = any(not MENU[p]["baes"] for p in seleccionados)
-    tiene_solo_baes = any(MENU[p]["solo_baes"] for p in seleccionados)
+    st.session_state.pago_elegido = "Débito / Crédito"
 
-    if tiene_solo_baes and tiene_no_baes:
-        st.error("⚠️ No puedes mezclar 'Menú BAES' con 'Colación' en el mismo pedido porque tienen medios de pago incompatibles.")
-        metodos_pago = []
-    elif tiene_solo_baes:
-        metodos_pago = ["BAES / JUNAEB"]
-        st.info("💳 Tu carrito incluye 'Menú BAES', por lo que el pago es exclusivo con tarjeta BAES / JUNAEB.")
-    elif tiene_no_baes:
-        metodos_pago = ["Débito / Crédito", "Efectivo en Caja"]
-        st.warning("⚠️ Nota: El producto 'Colación' no admite pago con tarjeta BAES / JUNAEB.")
-    else:
-        metodos_pago = ["Débito / Crédito", "Efectivo en Caja", "BAES / JUNAEB"]
+    with st.container(border=True):
+        st.markdown(":green[**✅ 💳 Débito / Crédito**]")
+        st.caption("Pago digital con tarjeta bancaria una vez confirmado el stock en Caja.")
 
-    pago_sel = st.selectbox("Selecciona tu medio de pago:", metodos_pago if metodos_pago else ["Sin medios compatibles"])
-
-    # Verificación de límite de pedidos por minuto (cooldown)
+    st.markdown("---")
     ahora_ts = time.time()
     segundos_transcurridos = ahora_ts - st.session_state.ultimo_pedido_ts
     en_cooldown = segundos_transcurridos < COOLDOWN_SEGUNDOS
     segundos_restantes = int(COOLDOWN_SEGUNDOS - segundos_transcurridos)
 
     if en_cooldown:
-        st.warning(f"⏳ Control anti-spam: debes esperar **{segundos_restantes} segundos** antes de enviar otro pedido desde este dispositivo.")
+        st.warning(f"⏳ Control anti-spam: debes esperar **{segundos_restantes} segundos** antes de enviar otra solicitud desde este dispositivo.")
 
-    if st.button("Confirmar y Pagar Pedido", type="primary", disabled=(total_items_carrito == 0 or not metodos_pago or en_cooldown)):
-        franja_sel = st.session_state.get("franja_elegida", TIME_SLOTS[0])
+    franja_sel = st.session_state.franja_elegida
+    pago_sel = st.session_state.pago_elegido
+
+    if franja_sel and pago_sel and total_items_carrito > 0:
+        st.caption(f"Resumen listo: Franja **{franja_sel}** | Medio de pago **{pago_sel}**")
+
+    if st.button(
+        "📩 Enviar Solicitud a Caja (Sin cobro aún)",
+        type="primary",
+        disabled=(total_items_carrito == 0 or not franja_sel or en_cooldown),
+        use_container_width=True
+    ):
         cupos_libres_reales = LIMIT_PER_SLOT - contar_cupos_ocupados_franja(franja_sel)
         productos_sin_stock = [p for p in seleccionados if config_op["productos_agotados"].get(p, False)]
 
         if not nombre_cliente.strip():
             st.error("⚠️ Por favor ingresa tu nombre y apellido para identificar tu pedido al retirar.")
         elif productos_sin_stock:
-            st.error(f"⚠️ Lo sentimos, el stock de **{', '.join(productos_sin_stock)}** acaba de agotarse en cocina.")
+            st.error(f"⚠️ Lo sentimos, el stock de **{', '.join(productos_sin_stock)}** acaba de agotarse.")
         elif franja_esta_cerrada_por_hora(franja_sel):
-            st.error(f"⏰ La franja **{franja_sel}** ya comenzó (hora actual {ahora_chile().strftime('%H:%M')}) y no acepta nuevos pedidos. Selecciona una franja posterior.")
+            st.error(f"⏰ La franja **{franja_sel}** ya comenzó (hora actual {ahora_chile().strftime('%H:%M')}) y no acepta nuevos pedidos.")
         elif total_items_carrito > cupos_libres_reales:
-            st.error(f"⚠️ La franja **{franja_sel}** solo tiene **{cupos_libres_reales} cupo(s)** disponibles y tu carrito requiere **{total_items_carrito} cupos**. Reduce la cantidad o elige otro horario.")
+            st.error(f"⚠️ La franja **{franja_sel}** solo tiene **{cupos_libres_reales} cupo(s)** disponibles y tu carrito requiere **{total_items_carrito} cupos**.")
         else:
             total_pagar = sum(MENU[prod]["precio"] * cant for prod, cant in st.session_state.carrito.items())
-            exito, tx_id = procesar_pago(pago_sel, total_pagar)
-            if exito:
-                order_id = generar_id_pedido()
-                hora_actual = ahora_chile().strftime("%H:%M:%S")
-                detalle_str = " + ".join([f"{cant}x {prod}" for prod, cant in st.session_state.carrito.items() if cant > 0])
-                primer_prod = seleccionados[0] if len(seleccionados) == 1 else "Pedido Múltiple"
+            order_id = generar_id_pedido()
+            hora_actual = ahora_chile().strftime("%H:%M:%S")
+            detalle_str = " + ".join([f"{cant}x {prod}" for prod, cant in st.session_state.carrito.items() if cant > 0])
+            primer_prod = seleccionados[0] if len(seleccionados) == 1 else "Pedido Múltiple"
 
-                nuevo_pedido = {
-                    "id": order_id,
-                    "cliente": nombre_cliente.strip(),
-                    "producto": primer_prod,
-                    "detalle_productos": detalle_str,
-                    "cantidad_total": total_items_carrito,
-                    "precio": total_pagar,
-                    "franja": franja_sel,
-                    "pago": pago_sel,
-                    "tx_id": tx_id,
-                    "estado": "Recibido",
-                    "hora_registro": hora_actual,
-                    "hora_entrega": "-"
-                }
-                db_orders.append(nuevo_pedido)
-                st.session_state.mis_pedidos.append(order_id)
-                st.session_state.ultimo_pedido_ts = time.time()
-                st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
-                st.session_state.pedido_popup = nuevo_pedido
-                st.rerun()
+            nuevo_pedido = {
+                "id": order_id,
+                "cliente": nombre_cliente.strip(),
+                "producto": primer_prod,
+                "detalle_productos": detalle_str,
+                "cantidad_total": total_items_carrito,
+                "precio": total_pagar,
+                "franja": franja_sel,
+                "pago": pago_sel,
+                "tx_id": "PENDIENTE",
+                "estado": "Pendiente aprobación",
+                "hora_registro": hora_actual,
+                "hora_aprobacion": "-",
+                "hora_pago": "-",
+                "hora_listo": "-",
+                "hora_llegada_cliente": "-",
+                "hora_entrega": "-"
+            }
+            db_orders.append(nuevo_pedido)
+            st.session_state.mis_pedidos.append(order_id)
+            st.session_state.ultimo_pedido_ts = time.time()
+            st.session_state.carrito = {prod: 0 for prod in MENU.keys()}
+            st.session_state.pedido_popup = nuevo_pedido
+            st.rerun()
 
-    # Buscador secundario por si se consulta desde otro navegador o dispositivo
+    # 5) Seguimiento en vivo abajo
+    intervalo_seguimiento = REFRESH_SEGUIMIENTO_ESTUDIANTE if st.session_state.mis_pedidos else None
+
+    @st.fragment(run_every=intervalo_seguimiento)
+    def seccion_seguimiento_vivo():
+        if st.session_state.mis_pedidos:
+            st.markdown("---")
+            col_titulo, col_btn = st.columns([4, 1])
+            with col_titulo:
+                st.markdown("### 📍 Seguimiento en Vivo de tu Pedido")
+            with col_btn:
+                if st.button("🔄 Actualizar", key="btn_refresh_est"):
+                    st.rerun()
+
+            for pid in reversed(st.session_state.mis_pedidos):
+                pedido_actual = next((o for o in db_orders if o["id"] == pid), None)
+                if pedido_actual:
+                    mostrar_tarjeta_seguimiento(pedido_actual, permitir_acciones=True)
+
+    seccion_seguimiento_vivo()
+
+    st.markdown("---")
     with st.expander("🔍 Consultar otro pedido por código"):
         busqueda_id = st.text_input("Ingresa el código de pedido (ej. ORD-1234):").strip().upper()
         if busqueda_id:
             pedido_encontrado = next((o for o in db_orders if o["id"] == busqueda_id), None)
             if pedido_encontrado:
-                mostrar_tarjeta_seguimiento(pedido_encontrado)
+                mostrar_tarjeta_seguimiento(pedido_encontrado, permitir_acciones=True)
             else:
                 st.error("Código de pedido no encontrado.")
 
+    with st.expander("⭐ Evaluar Prototipo (Validación Piloto ULS)"):
+        st.caption("Ayúdanos respondiendo estas 3 preguntas breves tras probar el sistema de pedidos:")
+        with st.form("form_encuesta_piloto", clear_on_submit=True):
+            eval_nombre = st.text_input("Tu nombre (opcional):", placeholder="Ej. Estudiante ULS")
+            eval_facilidad = st.slider("1. ¿Qué tan fácil fue realizar el pedido? (1 = Muy difícil, 5 = Muy fácil)", 1, 5, 5)
+            eval_ahorro = st.radio(
+                "2. ¿Sientes que este sistema reduciría tu tiempo de espera en fila?",
+                ["Sí, considerablemente", "Sí, un poco", "No noté diferencia"],
+                horizontal=True
+            )
+            eval_comentario = st.text_input("3. ¿Qué mejorarías o qué te costó entender? (opcional):")
+            enviar_eval = st.form_submit_button("Enviar Evaluación", type="primary")
+            if enviar_eval:
+                db_surveys.append({
+                    "hora": ahora_chile().strftime("%H:%M:%S"),
+                    "usuario": eval_nombre.strip() if eval_nombre.strip() else "Anónimo",
+                    "facilidad_1_a_5": eval_facilidad,
+                    "percepcion_ahorro": eval_ahorro,
+                    "comentario": eval_comentario.strip()
+                })
+                st.success("✅ ¡Muchas gracias! Tu evaluación quedó registrada para el estudio.")
+
 # ==========================================
-# VISTA 2: PERSONAL CAFETERÍA (KDS)
+# VISTA 2: CAJA (APROBACIÓN Y STOCK)
 # ==========================================
-elif modo == "🍳 Personal Cafetería (KDS)":
+elif modo == "💵 Caja (Aprobación y Stock)":
     if not verificar_login_personal():
         st.stop()
 
-    st.markdown("""
-        <style>
-        div.stButton > button[kind="primary"] {
-            background-color: #28a745;
-            border-color: #28a745;
-            color: white;
-            font-weight: bold;
-        }
-        div.stButton > button[kind="primary"]:hover {
-            background-color: #218838;
-            border-color: #1e7e34;
-            color: white;
-        }
-        div.stButton > button[kind="primary"]:disabled {
-            background-color: #1e7e34;
-            border-color: #1e7e34;
-            color: #e2e8f0;
-            opacity: 0.75;
-        }
-        </style>
-    """, unsafe_allow_html=True)
+    st.title("💵 Panel de Caja — Validación de Stock y Cobro")
+    st.caption("1) Aprueba la disponibilidad de stock. 2) Una vez pagado con Débito / Crédito, el pedido pasa automáticamente a Cocina.")
 
-    st.title("🍳 Pantalla de Control - Personal de Cafetería")
-
-    # Control rápido de stock de almuerzos y menú (sincronizado en vivo con estudiantes)
-    with st.expander("🛑 Control de Stock / Detener Venta de Productos", expanded=True):
-        st.caption("Apaga un producto cuando se acabe el stock en cocina para bloquear nuevas compras de inmediato.")
+    # Control de stock disponible
+    with st.expander("🛑 Control de Stock del Día (Activar / Detener Ventas)", expanded=True):
+        st.caption("Apaga un producto cuando ya no queden porciones disponibles para bloquear nuevas solicitudes.")
         cols_stock = st.columns(len(MENU))
         for idx, prod in enumerate(MENU.keys()):
             with cols_stock[idx]:
@@ -565,157 +874,407 @@ elif modo == "🍳 Personal Cafetería (KDS)":
                 disponible = st.toggle(
                     f"{prod}",
                     value=(not esta_agotado),
-                    key=f"stock_toggle_{prod}"
+                    key=f"caja_stock_toggle_{prod}"
                 )
                 nuevo_agotado = not disponible
                 if nuevo_agotado != esta_agotado:
                     config_op["productos_agotados"][prod] = nuevo_agotado
                     st.rerun()
                 if nuevo_agotado:
-                    st.error("🚫 Venta detenida")
+                    st.error("🚫 Sin stock")
                 else:
-                    st.success("✅ Disponible")
+                    st.success("✅ Con stock")
 
-    # Lector QR exclusivo para personal autorizado
-    with st.expander("📷 Escanear QR en Mesón para Entrega Rápida", expanded=False):
-        st.caption("Solo operativo dentro de la sesión del personal. Escanear el QR con una cámara externa normal no ejecuta acciones.")
-        col_cam, col_man = st.columns([1.2, 1])
+    @st.fragment(run_every=REFRESH_OPERACION)
+    def panel_aprobacion_caja():
+        pendientes_aprob = [o for o in db_orders if o["estado"] == "Pendiente aprobación"]
+        esperando_pago = [o for o in db_orders if o["estado"] == "Aprobado - Pendiente de Pago"]
+        enviados_cocina = [o for o in db_orders if o["estado"] in ["En preparación", "Listo", "Cliente en mesón", "Entregado"]]
 
-        with col_cam:
-            foto_qr = st.camera_input("Apunta la cámara al QR del estudiante", key="cam_kds_qr")
-            if foto_qr is not None:
-                texto_qr = decodificar_qr_imagen(foto_qr)
-                if texto_qr:
-                    tipo_res, msg_res = validar_y_entregar_token_qr(texto_qr)
-                    if tipo_res == "success":
-                        st.success(msg_res)
-                    elif tipo_res == "warning":
-                        st.warning(msg_res)
-                    else:
-                        st.error(msg_res)
-                else:
-                    st.warning("No se detectó un código QR nítido. Acerca el celular a la cámara y vuelve a capturar.")
-
-        with col_man:
-            st.markdown("**Lectura por pistola USB / ingreso manual:**")
-            token_manual = st.text_input(
-                "Escanea aquí con lector óptico:",
-                placeholder="DOMEYKO-QR|ORD-1234|TX-XXXXXX",
-                key="input_lector_usb"
-            ).strip()
-            if st.button("Validar y Entregar Token", key="btn_validar_token"):
-                if token_manual:
-                    tipo_res, msg_res = validar_y_entregar_token_qr(token_manual)
-                    if tipo_res == "success":
-                        st.success(msg_res)
-                    elif tipo_res == "warning":
-                        st.warning(msg_res)
-                    else:
-                        st.error(msg_res)
-
-    def renderizar_tarjeta_kds(order: dict, prefix_key: str):
-        with st.container(border=True):
-            c_head, c_disc = st.columns([4, 1])
-            with c_head:
-                st.markdown(f"#### 📦 `{order['id']}` — 👤 **{order.get('cliente', 'Sin nombre')}**")
-                st.write(f"**Detalle:** {order.get('detalle_productos', order['producto'])} ({order.get('cantidad_total', 1)} cupo/s)")
-                st.caption(f"🕒 Pedido: {order['hora_registro']} | 💳 {order['pago']} ({formato_clp(order['precio'])}) | TX: `{order['tx_id']}`")
-            with c_disc:
-                if order["estado"] != "Descartado":
-                    if st.button(
-                        "❌ Descartar",
-                        key=f"{prefix_key}_disc_{order['id']}",
-                        help="Cancela el pedido y libera sus cupos en esta franja",
-                        use_container_width=True
-                    ):
-                        order["estado"] = "Descartado"
-                        order["hora_entrega"] = "Descartado"
-                        st.rerun()
-
-            b1, b2, b3, b4 = st.columns(4)
-            botones_config = [
-                (b1, "Recibido", "📥 Recibido", "secondary"),
-                (b2, "En preparación", "👨‍🍳 Preparando", "secondary"),
-                (b3, "Listo", "🔔 Listo", "secondary"),
-                (b4, "Entregado", "✅ Entregado", "primary"),
-            ]
-
-            for col_btn, estado_obj, etiqueta, tipo_btn in botones_config:
-                with col_btn:
-                    es_actual = (order["estado"] == estado_obj)
-                    texto_btn = f"• {etiqueta} •" if es_actual else etiqueta
-                    if st.button(
-                        texto_btn,
-                        key=f"{prefix_key}_btn_{order['id']}_{estado_obj}",
-                        type=tipo_btn,
-                        disabled=es_actual,
-                        use_container_width=True
-                    ):
-                        order["estado"] = estado_obj
-                        if estado_obj == "Entregado":
-                            order["hora_entrega"] = ahora_chile().strftime("%H:%M:%S")
-                        else:
-                            order["hora_entrega"] = "-"
-                        st.rerun()
-
-    @st.fragment(run_every=REFRESH_KDS_OPERADOR)
-    def panel_pedidos_kds():
-        pedidos_activos = [o for o in db_orders if o["estado"] not in ["Entregado", "Descartado"]]
-        pedidos_terminados = [o for o in db_orders if o["estado"] in ["Entregado", "Descartado"]]
-
-        col_m1, col_m2, col_r = st.columns([2, 2, 1])
-        with col_m1:
-            st.metric("Pedidos Activos en Cocina", len(pedidos_activos))
-        with col_m2:
-            st.metric("Pedidos Terminados / Descartados", len(pedidos_terminados))
-        with col_r:
-            if st.button("🔄 Refrescar", key="btn_refresh_kds"):
+        c_m1, c_m2, c_m3, c_r = st.columns([1.6, 1.6, 1.6, 1])
+        with c_m1:
+            st.metric("1. Por Aprobar Stock", len(pendientes_aprob))
+        with c_m2:
+            st.metric("2. Esperando Pago", len(esperando_pago))
+        with c_m3:
+            st.metric("3. Pagados en Cocina", len(enviados_cocina))
+        with c_r:
+            if st.button("🔄 Refrescar", key="btn_refresh_caja"):
                 st.rerun()
 
-        tab_activos, tab_historial = st.tabs([
-            f"🔥 Pedidos Activos por Franja ({len(pedidos_activos)})",
-            f"📁 Terminados y Descartados ({len(pedidos_terminados)})"
+        tab_aprobar, tab_cobrar = st.tabs([
+            f"📥 1. Solicitudes por Aprobar ({len(pendientes_aprob)})",
+            f"💳 2. Aprobados Esperando Pago ({len(esperando_pago)})"
         ])
 
-        with tab_activos:
-            if not pedidos_activos:
-                st.info("No hay pedidos pendientes en este momento. Esperando órdenes...")
+        with tab_aprobar:
+            if not pendientes_aprob:
+                st.info("No hay solicitudes nuevas pendientes de revisión de stock.")
             else:
-                for slot in TIME_SLOTS:
-                    ordenes_franja = [o for o in pedidos_activos if o["franja"] == slot]
-                    cupos_usados = contar_cupos_ocupados_franja(slot)
-                    st.markdown(f"### ⏰ Franja {slot} — Cupos ocupados: {cupos_usados}/{LIMIT_PER_SLOT}")
-                    if not ordenes_franja:
-                        st.caption("Sin pedidos activos en esta franja.")
-                    else:
-                        for order in ordenes_franja:
-                            renderizar_tarjeta_kds(order, "act")
-                    st.markdown("---")
+                for order in pendientes_aprob:
+                    with st.container(border=True):
+                        col_inf, col_acc = st.columns([3, 1.7])
+                        with col_inf:
+                            st.markdown(f"#### 🧾 `{order['id']}` — 👤 **{order['cliente']}** | ⏰ Franja: `{order['franja']}`")
+                            st.write(f"**Pedido:** {order['detalle_productos']} ({order.get('cantidad_total', 1)} cupo/s)")
+                            st.caption(f"Solicitud: {order['hora_registro']} | Medio: **{order['pago']}** | Total: **{formato_clp(order['precio'])}**")
+                        with col_acc:
+                            if st.button(
+                                "✅ Aprobar Stock",
+                                key=f"caja_aprobar_{order['id']}",
+                                type="primary",
+                                use_container_width=True
+                            ):
+                                actualizar_estado_pedido(order, "Aprobado - Pendiente de Pago")
+                                st.toast(f"Pedido {order['id']} aprobado. Habilitado para pago del cliente.")
+                                st.rerun()
 
-        with tab_historial:
-            if not pedidos_terminados:
-                st.info("Aún no hay pedidos entregados o descartados.")
+                            if st.button(
+                                "❌ Rechazar (Sin Stock)",
+                                key=f"caja_rechazar_{order['id']}",
+                                use_container_width=True
+                            ):
+                                actualizar_estado_pedido(order, "Descartado", motivo_descarte="Rechazado en caja")
+                                st.toast(f"Pedido {order['id']} rechazado. Cupos liberados.")
+                                st.rerun()
+
+        with tab_cobrar:
+            if not esperando_pago:
+                st.info("No hay pedidos aprobados pendientes de pago.")
             else:
-                for order in reversed(pedidos_terminados):
-                    st.caption(f"Franja: **{order['franja']}** | Estado final: **{order['estado'].upper()}** | Cierre: {order['hora_entrega']}")
-                    renderizar_tarjeta_kds(order, "hist")
+                for order in esperando_pago:
+                    with st.container(border=True):
+                        c_p1, c_p2 = st.columns([3, 1.8])
+                        with c_p1:
+                            st.markdown(f"#### 💳 `{order['id']}` — 👤 **{order['cliente']}** | ⏰ Franja: `{order['franja']}`")
+                            st.write(f"**Detalle:** {order['detalle_productos']} | Total: **{formato_clp(order['precio'])}** ({order['pago']})")
+                            st.caption("📱 Esperando que el estudiante confirme el pago digital desde su celular.")
+                        with c_p2:
+                            if st.button(
+                                "✅ Confirmar Pago Manual",
+                                key=f"caja_cobrar_{order['id']}",
+                                type="primary",
+                                use_container_width=True
+                            ):
+                                exito, tx_id = procesar_pago(order["pago"], order["precio"])
+                                if exito:
+                                    order["tx_id"] = tx_id
+                                    actualizar_estado_pedido(order, "En preparación")
+                                    st.toast(f"Pago registrado ({tx_id}). Pedido enviado a Cocina.")
+                                    st.rerun()
 
-    panel_pedidos_kds()
+                            if st.button(
+                                "❌ Anular por No Pago",
+                                key=f"caja_anular_impago_{order['id']}",
+                                use_container_width=True
+                            ):
+                                actualizar_estado_pedido(order, "Descartado", motivo_descarte="Anulado por falta de pago")
+                                st.rerun()
+
+    panel_aprobacion_caja()
 
 # ==========================================
-# VISTA 3: MÉTRICAS Y EXPORTACIÓN
+# VISTA 3: COCINA (PREPARACIÓN Y ENTREGA - ACCESIBLE)
+# ==========================================
+elif modo == "🍳 Cocina (Preparación y Entrega)":
+    if not verificar_login_personal():
+        st.stop()
+
+    st.markdown("""
+        <style>
+        div.stButton > button[kind="primary"] {
+            background-color: #198754 !important;
+            border: 3px solid #146c43 !important;
+            color: #ffffff !important;
+            font-size: 21px !important;
+            font-weight: 800 !important;
+            min-height: 68px !important;
+            border-radius: 12px !important;
+            letter-spacing: 0.4px !important;
+        }
+        div.stButton > button[kind="primary"]:hover {
+            background-color: #157347 !important;
+        }
+
+        div.stButton > button[kind="secondary"] {
+            background-color: #e67e22 !important;
+            border: 3px solid #ca6f1e !important;
+            color: #ffffff !important;
+            font-size: 20px !important;
+            font-weight: 800 !important;
+            min-height: 64px !important;
+            border-radius: 12px !important;
+        }
+        div.stButton > button[kind="secondary"]:hover {
+            background-color: #d35400 !important;
+        }
+
+        .cocina-titulo-pedido {
+            font-size: 26px;
+            font-weight: 800;
+            margin-bottom: 4px;
+            line-height: 1.2;
+        }
+        .cocina-detalle-comida {
+            font-size: 23px;
+            font-weight: 700;
+            color: #1a202c;
+            background-color: #f8f9fa;
+            padding: 10px 14px;
+            border-radius: 8px;
+            border-left: 6px solid #0d6efd;
+            margin: 8px 0;
+        }
+        .cocina-subdato {
+            font-size: 17px;
+            color: #4a5568;
+            font-weight: 600;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("# 🍳 Pantalla de Cocina")
+    st.markdown("#### Instrucciones rápidas: **1)** Prepara el pedido y toca **🔔 MARCAR LISTO**. **2)** Cuando el estudiante avise que llegó al mesón, confirma la entrega escaneando su **QR** o tocando **🤝 ENTREGAR PEDIDO**.")
+
+    if st.session_state.ultimo_resultado_qr is not None:
+        tipo_res, msg_res = st.session_state.ultimo_resultado_qr
+        st.session_state.ultimo_resultado_qr = None
+        if tipo_res == "success":
+            st.success(msg_res)
+        elif tipo_res == "warning":
+            st.warning(msg_res)
+        elif tipo_res == "info":
+            st.info(msg_res)
+        else:
+            st.error(msg_res)
+
+    @st.fragment(run_every=REFRESH_OPERACION)
+    def panel_cocina_vivo():
+        clientes_esperando = [o for o in db_orders if o["estado"] == "Cliente en mesón"]
+        en_preparacion = [o for o in db_orders if o["estado"] == "En preparación"]
+        listos_sin_llegar = [o for o in db_orders if o["estado"] == "Listo"]
+        historial_cerrados = [o for o in db_orders if o["estado"] in ["Entregado", "Descartado"]]
+
+        c1, c2, c3, c_ref = st.columns([1.6, 1.6, 1.6, 1])
+        with c1:
+            st.metric("🚨 ESPERANDO EN MESÓN", len(clientes_esperando))
+        with c2:
+            st.metric("👨‍🍳 POR PREPARAR", len(en_preparacion))
+        with c3:
+            st.metric("🔔 LISTOS PARA RETIRAR", len(listos_sin_llegar))
+        with c_ref:
+            st.write("")
+            if st.button("🔄 Actualizar", key="btn_refresh_cocina", use_container_width=True):
+                st.rerun()
+
+        st.markdown("---")
+
+        # =========================================================
+        # BLOQUE 1: CLIENTES QUE AVISARON QUE LLEGARON AL MESÓN
+        # =========================================================
+        if clientes_esperando:
+            st.error(f"🚨 ¡ATENCIÓN! Hay **{len(clientes_esperando)} persona(s)** esperando en el mesón para retirar (escanea su QR o confirma abajo):")
+            for order in clientes_esperando:
+                with st.container(border=True):
+                    col_alerta, col_ent = st.columns([2.6, 1.4])
+                    with col_alerta:
+                        st.markdown(
+                            f"<div class='cocina-titulo-pedido'>📣 {order['cliente']} — Pedido {order['id']}</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f"<div class='cocina-detalle-comida' style='border-left-color: #dc3545; background-color: #fff5f5;'>"
+                            f"🍽️ ENTREGAR: {order['detalle_productos']}</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f"<div class='cocina-subdato'>⏰ Franja: {order['franja']} | Avisó llegada: {order.get('hora_llegada_cliente', '-')}</div>",
+                            unsafe_allow_html=True
+                        )
+                    with col_ent:
+                        st.write("")
+                        if st.button(
+                            "🤝 ENTREGAR PEDIDO",
+                            key=f"cocina_entregar_{order['id']}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            actualizar_estado_pedido(order, "Entregado")
+                            st.toast(f"✅ Pedido {order['id']} entregado a {order['cliente']}.")
+                            st.rerun()
+            st.markdown("---")
+
+        # =========================================================
+        # BLOQUE 2: PEDIDOS POR PREPARAR
+        # =========================================================
+        st.markdown("## 👨‍🍳 1. Pedidos por Preparar")
+        if not en_preparacion:
+            st.success("✅ No hay pedidos pendientes de preparación en este momento.")
+        else:
+            for slot in TIME_SLOTS:
+                ordenes_slot = [o for o in en_preparacion if o["franja"] == slot]
+                if ordenes_slot:
+                    st.markdown(f"### ⏰ Horario de Retiro: **{slot}** ({len(ordenes_slot)} pedido/s)")
+                    for order in ordenes_slot:
+                        with st.container(border=True):
+                            c_txt, c_btn = st.columns([2.6, 1.4])
+                            with c_txt:
+                                st.markdown(
+                                    f"<div class='cocina-titulo-pedido'>📦 {order['id']} — 👤 {order['cliente']}</div>",
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    f"<div class='cocina-detalle-comida'>🍽️ PREPARAR: {order['detalle_productos']}</div>",
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    f"<div class='cocina-subdato'>Pagado a las {order.get('hora_pago', '-')}</div>",
+                                    unsafe_allow_html=True
+                                )
+                            with c_btn:
+                                st.write("")
+                                if st.button(
+                                    "🔔 MARCAR LISTO",
+                                    key=f"cocina_listo_{order['id']}",
+                                    type="secondary",
+                                    use_container_width=True
+                                ):
+                                    actualizar_estado_pedido(order, "Listo")
+                                    st.toast(f"🔔 Pedido {order['id']} listo para retirar.")
+                                    st.rerun()
+
+        st.markdown("---")
+
+        # =========================================================
+        # BLOQUE 3: PEDIDOS YA LISTOS ESPERANDO AVISO DEL ALUMNO
+        # =========================================================
+        st.markdown("## 🔔 2. Pedidos Listos (Esperando al Estudiante)")
+        if not listos_sin_llegar:
+            st.info("No hay pedidos listos esperando retiro.")
+        else:
+            for order in listos_sin_llegar:
+                with st.container(border=True):
+                    c_l1, c_l2 = st.columns([2.6, 1.4])
+                    with c_l1:
+                        st.markdown(
+                            f"<div class='cocina-titulo-pedido'>🔔 {order['id']} — 👤 {order['cliente']}</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f"<div class='cocina-detalle-comida' style='border-left-color: #198754;'>"
+                            f"🍽️ LISTO: {order['detalle_productos']}</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f"<div class='cocina-subdato'>⏰ Franja: {order['franja']} | Listo desde las {order.get('hora_listo', '-')}</div>",
+                            unsafe_allow_html=True
+                        )
+                    with c_l2:
+                        st.write("")
+                        if st.button(
+                            "🤝 ENTREGAR AHORA",
+                            key=f"cocina_ent_man_{order['id']}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            actualizar_estado_pedido(order, "Entregado")
+                            st.toast(f"✅ Pedido {order['id']} entregado.")
+                            st.rerun()
+
+        with st.expander(f"📁 Ver Pedidos Ya Entregados Hoy ({len(historial_cerrados)})", expanded=False):
+            if not historial_cerrados:
+                st.info("Aún no hay pedidos entregados hoy.")
+            else:
+                for order in reversed(historial_cerrados):
+                    st.write(f"✔️ **{order['id']} — {order['cliente']}** | {order['detalle_productos']} | Estado: **{order['estado']}** ({order['hora_entrega']})")
+
+    panel_cocina_vivo()
+
+    # =========================================================
+    # ESCÁNER QR OPCIONAL PARA CONFIRMAR RETIRO
+    # =========================================================
+    st.markdown("---")
+    st.markdown("## 📷 Confirmar Entrega con QR (Opcional)")
+    st.caption("Si el estudiante muestra su QR al retirar, escanéalo aquí para marcar el pedido como Entregado automáticamente (también puedes usar los botones verdes de arriba).")
+
+    if not st.session_state.escaner_abierto:
+        if st.button(
+            "📷 ABRIR ESCÁNER QR (CONFIRMAR ENTREGA)",
+            key="btn_abrir_escaner",
+            type="primary",
+            use_container_width=True
+        ):
+            st.session_state.escaner_abierto = True
+            st.session_state.scanner_session_id += 1
+            st.rerun()
+    else:
+        if st.button(
+            "❌ CERRAR CÁMARA ESCÁNER",
+            key="btn_cerrar_escaner",
+            type="secondary",
+            use_container_width=True
+        ):
+            st.session_state.escaner_abierto = False
+            st.rerun()
+
+        with st.container(border=True):
+            col_cam, col_man = st.columns([1.3, 1])
+            with col_cam:
+                qr_leido_camara = escaner_qr_nativo(
+                    key=f"qr_cam_v2_{st.session_state.scanner_session_id}",
+                    default=None
+                )
+                if qr_leido_camara:
+                    tipo_res, msg_res = procesar_escaneo_qr_totem(qr_leido_camara)
+                    st.session_state.ultimo_resultado_qr = (tipo_res, msg_res)
+                    st.session_state.escaner_abierto = False
+                    st.rerun()
+
+            with col_man:
+                st.markdown("#### Lector Óptico / Ingreso Manual:")
+                token_manual = st.text_input(
+                    "Código leído:",
+                    placeholder="DOMEYKO-QR|ORD-1234|TX-XXXXXX",
+                    key="input_lector_cocina"
+                ).strip()
+                if st.button(
+                    "✅ CONFIRMAR ENTREGA POR QR",
+                    key="btn_validar_cocina",
+                    type="primary",
+                    use_container_width=True
+                ):
+                    if token_manual:
+                        tipo_res, msg_res = procesar_escaneo_qr_totem(token_manual)
+                        st.session_state.ultimo_resultado_qr = (tipo_res, msg_res)
+                        if tipo_res == "success":
+                            st.session_state.escaner_abierto = False
+                        st.rerun()
+
+# ==========================================
+# VISTA 4: MÉTRICAS Y EXPORTACIÓN
 # ==========================================
 else:
     if not verificar_login_personal():
         st.stop()
 
     st.title("📊 Análisis de Datos y Trazabilidad del Prototipo")
-    st.markdown("Registro cuantitativo de órdenes para validación de tiempos de atención.")
+    st.markdown("Registro cuantitativo de órdenes por etapa (Solicitud → Aprobación → Pago → Cocina → Llegada → Entrega) y encuestas piloto.")
 
+    st.subheader("1. Tiempos de Operación por Pedido")
     if not db_orders:
         st.info("Aún no hay datos recolectados. Registra algunos pedidos desde la vista de estudiante.")
     else:
-        df = pd.DataFrame(db_orders)
+        registros_con_metricas = []
+        for o in db_orders:
+            fila = dict(o)
+            fila["min_aprobacion_caja"] = calcular_minutos_diferencia(o.get("hora_registro"), o.get("hora_aprobacion"))
+            fila["min_confirmacion_pago"] = calcular_minutos_diferencia(o.get("hora_aprobacion"), o.get("hora_pago"))
+            fila["min_preparacion_cocina"] = calcular_minutos_diferencia(o.get("hora_pago"), o.get("hora_listo"))
+            fila["min_espera_retiro"] = calcular_minutos_diferencia(o.get("hora_llegada_cliente"), o.get("hora_entrega"))
+            fila["min_total_atencion"] = calcular_minutos_diferencia(o.get("hora_registro"), o.get("hora_entrega"))
+            registros_con_metricas.append(fila)
+
+        df = pd.DataFrame(registros_con_metricas)
         st.dataframe(df, use_container_width=True)
 
         csv_data = df.to_csv(index=False).encode('utf-8')
@@ -725,4 +1284,22 @@ else:
             file_name=f"reporte_cafeteria_{ahora_chile().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv",
             type="primary"
+        )
+
+    st.markdown("---")
+    st.subheader("2. Resultados de Encuesta Piloto (Usabilidad)")
+    if not db_surveys:
+        st.info("Aún no hay respuestas de encuesta registradas desde la vista del estudiante.")
+    else:
+        df_surveys = pd.DataFrame(db_surveys)
+        promedio_facilidad = round(df_surveys["facilidad_1_a_5"].mean(), 2)
+        st.metric("Promedio Facilidad de Uso (1 a 5)", f"{promedio_facilidad} / 5.0", f"{len(df_surveys)} respuestas")
+        st.dataframe(df_surveys, use_container_width=True)
+
+        csv_surveys = df_surveys.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Descargar Encuestas Piloto (CSV)",
+            data=csv_surveys,
+            file_name=f"encuestas_piloto_{ahora_chile().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv"
         )
