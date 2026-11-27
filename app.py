@@ -19,7 +19,7 @@ st.set_page_config(page_title="Domeyko GO - Casino ULS", page_icon="🍔", layou
 # ==========================================
 # True  -> Versión de Pruebas: muestra interruptor para activar/desactivar validación horaria.
 # False -> Versión Oficial: oculta el interruptor y exige siempre pedir antes del inicio de la franja.
-MODO_PRUEBAS = False
+MODO_PRUEBAS = True
 
 # Color de fondo opcional (deja None para usar el tema por defecto de Streamlit)
 COLOR_FONDO_APP = None
